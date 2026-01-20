@@ -9,7 +9,7 @@ class Runtime {
 private:
     llaisysDeviceType_t _device_type;
     int _device_id;
-    const LlaisysRuntimeAPI *_api;
+    const LlaisysRuntimeAPI *_api;//运行时API
     MemoryAllocator *_allocator;
     bool _is_active;
     void _activate();

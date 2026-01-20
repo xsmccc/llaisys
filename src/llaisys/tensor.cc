@@ -10,6 +10,7 @@ __C {
         llaisysDeviceType_t device_type,
         int device_id) {
         std::vector<size_t> shape_vec(shape, shape + ndim);
+        printf("[C API] Received request, converting args...\n");
         return new LlaisysTensor{llaisys::Tensor::create(shape_vec, dtype, device_type, device_id)};
     }
 

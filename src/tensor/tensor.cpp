@@ -8,6 +8,9 @@
 
 namespace llaisys {
 
+//storage——存储张量数据的内存块的共享指针
+//offset——张量在存储中的起始索引，byte为单位
+//meta——描述张量形状、数据类型和步长的元数据
 Tensor::Tensor(TensorMeta meta, core::storage_t storage, size_t offset)
     : _meta(std::move(meta)), _storage(std::move(storage)), _offset(offset) {}
 
@@ -164,27 +167,178 @@ void Tensor::debug() const {
 }
 
 bool Tensor::isContiguous() const {
-    TO_BE_IMPLEMENTED();
+    if (_meta.shape.empty()) return true;
+    size_t accumulated = 1;
+    for (int i = _meta.shape.size() - 1; i >= 0; --i) {
+        // _meta.strides[i] 是 ptrdiff_t，这里强转一下比较
+        if ((size_t)_meta.strides[i] != accumulated) {
+            return false;
+        }
+        accumulated *= _meta.shape[i];
+    }
     return true;
 }
 
+// 创建新张量，改变原始张量维度的顺序，转置也通过此函数实现，无需移动数据
 tensor_t Tensor::permute(const std::vector<size_t> &order) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    // 检查参数合法性 维度是否一样
+    if (order.size() != _meta.shape.size()){
+        throw std::runtime_error("Permute dimensions mismatch.");
+    }
+
+    std::vector<ptrdiff_t> new_stride;
+    std::vector<size_t> new_shape;
+
+    new_stride.resize(_meta.strides.size());
+    new_shape.resize(_meta.shape.size());
+    int i = 0;
+
+    for (size_t d : order){
+        if (d >= _meta.shape.size()){
+            throw std::runtime_error("Permute dimensions mismatch.");
+        }
+        new_shape[i] = (_meta.shape[d]);
+        new_stride[i] = (_meta.strides[d]);
+        i++;
+    }
+
+    TensorMeta new_meta;
+    new_meta.dtype = _meta.dtype;
+    new_meta.shape = new_shape;
+    new_meta.strides = new_stride;
+
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage));
 }
 
+// 返回一个以传入的shape构造的新张量 也就是变换形状
 tensor_t Tensor::view(const std::vector<size_t> &shape) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    size_t current_numel = 1;
+    for (size_t dim: _meta.shape) current_numel *= dim; //获取当前数据总量
+
+    size_t new_numel = 1;
+    for (size_t dim : shape) new_numel *= dim; //获取当前数据总量
+
+    if (current_numel != new_numel)
+        throw std::runtime_error("View shape mismatch: numel must be the same.");
+    
+    if(!isContiguous())
+        throw std::runtime_error("View on non-contiguous tensor is not supported yet.");
+    
+    std::vector<ptrdiff_t> new_strides(shape.size());
+    size_t stride = 1;
+    for(int i = shape.size()-1;i >= 0;--i){
+        new_strides[i] = static_cast<ptrdiff_t>(stride);
+        stride *= shape[i];
+    }
+
+    TensorMeta new_meta;
+    new_meta.dtype = _meta.dtype;
+    new_meta.shape = shape;
+    new_meta.strides = new_strides;
+
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage));
 }
 
 tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    // 输入参数有效性判断
+    // 维度判断
+    if (dim >= _meta.shape.size()){
+        throw std::runtime_error("Slice dimesion out of range.\n");
+    }
+    // 参数判断
+    if (start > _meta.shape[dim] || start < 0 || end > _meta.shape[dim] || start >= end){
+        throw std::runtime_error("Slice : Argument start or end out of range.\n");
+    }
+    
+    std::vector<size_t> new_shape = _meta.shape;
+    new_shape[dim] = end - start; // 输入参数左闭右开
+
+    //数据排布不变 变得是offset 那么stride就不变 
+    std::vector<ptrdiff_t> new_stride = _meta.strides;
+
+    //修改偏移量
+    size_t elem_size = 0;
+    switch (_meta.dtype){
+        case LLAISYS_DTYPE_I8:
+        case LLAISYS_DTYPE_U8:
+        case LLAISYS_DTYPE_BYTE:
+        case LLAISYS_DTYPE_BOOL:
+        case LLAISYS_DTYPE_F8:
+            elem_size = 1;
+            break;
+        case LLAISYS_DTYPE_I16:
+        case LLAISYS_DTYPE_U16:
+        case LLAISYS_DTYPE_F16:
+        case LLAISYS_DTYPE_BF16:
+            elem_size = 2;
+            break;
+        case LLAISYS_DTYPE_I32:
+        case LLAISYS_DTYPE_U32:
+        case LLAISYS_DTYPE_F32:
+            elem_size = 4;
+            break;
+        case LLAISYS_DTYPE_I64:
+        case LLAISYS_DTYPE_U64:
+        case LLAISYS_DTYPE_F64:
+            elem_size = 8;
+            break;
+        default:
+            elem_size = 4; 
+            break;
+    }
+    size_t additional_offset = start * _meta.strides[dim] * elem_size; //多余的偏移量来自于前面跳过的部分，和end无关
+    size_t new_offset = _offset + additional_offset;
+
+    //构造新 Tensor
+    TensorMeta new_meta;
+    new_meta.dtype = _meta.dtype;
+    new_meta.shape = new_shape;
+    new_meta.strides = new_stride;
+
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage,new_offset));
 }
 
+//task1-1
 void Tensor::load(const void *src_) {
-    TO_BE_IMPLEMENTED();
+    size_t numel = 1;
+    // 首先获取维度大小
+    for(size_t dim : _meta.shape)
+        numel *= dim;
+    //定义数据类型的大小
+    size_t elem_size = 0;
+    switch (_meta.dtype){
+        case LLAISYS_DTYPE_I8:
+        case LLAISYS_DTYPE_U8:
+        case LLAISYS_DTYPE_BYTE:
+        case LLAISYS_DTYPE_BOOL:
+        case LLAISYS_DTYPE_F8:
+            elem_size = 1;
+            break;
+        case LLAISYS_DTYPE_I16:
+        case LLAISYS_DTYPE_U16:
+        case LLAISYS_DTYPE_F16:
+        case LLAISYS_DTYPE_BF16:
+            elem_size = 2;
+            break;
+        case LLAISYS_DTYPE_I32:
+        case LLAISYS_DTYPE_U32:
+        case LLAISYS_DTYPE_F32:
+            elem_size = 4;
+            break;
+        case LLAISYS_DTYPE_I64:
+        case LLAISYS_DTYPE_U64:
+        case LLAISYS_DTYPE_F64:
+            elem_size = 8;
+            break;
+        default:
+            elem_size = 4; 
+            break;
+    }
+    size_t total_bytes = numel * elem_size;     //获取总字节数
+    std::byte *dst = _storage->memory() + _offset; //获取目标地址
+    llaisysDeviceType_t dev_type = _storage->deviceType(); //获取设备类型
+    const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(dev_type);// 调用runtimeapi
+    api->memcpy_sync(dst, src_, total_bytes,LLAISYS_MEMCPY_H2D); //从api中获取内存搬运函数
 }
 
 tensor_t Tensor::contiguous() const {

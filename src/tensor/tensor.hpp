@@ -14,9 +14,9 @@ struct TensorMeta {
 
 class Tensor {
 private:
-    TensorMeta _meta;
-    core::storage_t _storage;
-    size_t _offset;
+    TensorMeta _meta;//元数据-描述张量形状、数据类型和步长
+    core::storage_t _storage;//存储张量数据的内存块的共享指针
+    size_t _offset;//张量在存储中的起始索引
     Tensor(TensorMeta meta, core::storage_t storage, size_t offset = 0);
 
 public:
@@ -48,7 +48,7 @@ public:
     tensor_t slice(size_t dim, size_t start, size_t end) const;
     tensor_t view(const std::vector<size_t> &shape) const;
 
-    // Load data from host memory
+    // Load data from host memory 从host中加载数据
     void load(const void *src);
 
     // Challenging features

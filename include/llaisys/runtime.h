@@ -23,7 +23,7 @@ __C {
     typedef void (*memcpy_async_api)(void *, const void *, size_t, llaisysMemcpyKind_t, llaisysStream_t);
 
     struct LlaisysRuntimeAPI {
-        get_device_count_api get_device_count;
+        get_device_count_api get_device_count;//获取设备数量
         set_device_api set_device;
         device_synchronize_api device_synchronize;
         create_stream_api create_stream;
@@ -33,7 +33,7 @@ __C {
         free_device_api free_device;
         malloc_host_api malloc_host;
         free_host_api free_host;
-        memcpy_sync_api memcpy_sync;
+        memcpy_sync_api memcpy_sync;//同步拷贝API
         memcpy_async_api memcpy_async;
     };
 
