@@ -12,6 +12,7 @@
 #include "../ops/self_attention/op.hpp"
 #include "../ops/swiglu/op.hpp"
 
+//保持函数名不动  方便python的ctypes库寻找
 __C {
     void llaisysAdd(llaisysTensor_t c, llaisysTensor_t a, llaisysTensor_t b) {
         llaisys::ops::add(c->tensor, a->tensor, b->tensor);

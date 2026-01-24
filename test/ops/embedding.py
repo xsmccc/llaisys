@@ -8,7 +8,7 @@ from test_utils import random_int_tensor, random_tensor, check_equal, benchmark
 
 
 def torch_embedding(out, idx, embd):
-    out[:] = embd[idx]
+    out[:] = embd[idx] # 原位修改 将embd中idx的数据拿出来放入out中
 
 
 def test_op_embedding(
@@ -22,10 +22,10 @@ def test_op_embedding(
     embd, embd_ = random_tensor(embd_shape, dtype_name, device_name)
     idx, idx_ = random_int_tensor(idx_shape, device_name, high=embd_shape[0])
     out, out_ = random_tensor((idx_shape[0], embd_shape[1]), dtype_name, device_name)
-    torch_embedding(out, idx, embd)
-    llaisys.Ops.embedding(out_, idx_, embd_)
+    torch_embedding(out, idx, embd) # 标准答案
+    llaisys.Ops.embedding(out_, idx_, embd_) # C++ 生成答案
 
-    check_equal(out_, out, strict=True)
+    check_equal(out_, out, strict=True) # 检查是否相等
 
     if profile:
         benchmark(

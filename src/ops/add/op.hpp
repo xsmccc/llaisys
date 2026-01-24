@@ -3,5 +3,5 @@
 #include "../../tensor/tensor.hpp"
 
 namespace llaisys::ops {
-void add(tensor_t c, tensor_t a, tensor_t b);
+void add(tensor_t c, tensor_t a, tensor_t b);//add函数声明
 }

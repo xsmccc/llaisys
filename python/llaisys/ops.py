@@ -2,7 +2,7 @@ from .libllaisys import LIB_LLAISYS
 from .tensor import Tensor
 from ctypes import c_float, c_int
 
-
+# 调用C底层代码 llaisys库 llaisys.so=Xmake编译将C++代码打包为python可识别的动态库文件
 class Ops:
     @staticmethod
     def add(c: Tensor, a: Tensor, b: Tensor):

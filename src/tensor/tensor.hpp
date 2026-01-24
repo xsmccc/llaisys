@@ -17,7 +17,7 @@ private:
     TensorMeta _meta;//元数据-描述张量形状、数据类型和步长
     core::storage_t _storage;//存储张量数据的内存块的共享指针
     size_t _offset;//张量在存储中的起始索引
-    Tensor(TensorMeta meta, core::storage_t storage, size_t offset = 0);
+    Tensor(TensorMeta meta, core::storage_t storage, size_t offset = 0); //构造函数
 
 public:
     static tensor_t create(
@@ -25,7 +25,7 @@ public:
         llaisysDataType_t dtype,
         llaisysDeviceType_t device_type = LLAISYS_DEVICE_CPU,
         int device = 0);
-    ~Tensor() = default;
+    ~Tensor() = default; //默认析构函数
     // Info
     std::byte *data();
     const std::byte *data() const;
