@@ -4,7 +4,7 @@
 namespace llaisys {
 namespace core {
 class Storage;
-using storage_t = std::shared_ptr<Storage>;
+using storage_t = std::shared_ptr<Storage>; //引用计数指针 多张量可共享内存
 
 class MemoryAllocator;
 

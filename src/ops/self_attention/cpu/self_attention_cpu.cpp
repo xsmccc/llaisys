@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <limits>
 
+//q : [seq_len, nhead, head_dim]
+//k : [total_len, kv_head, head_dim]
+//v : [total_len, kv_head, v_head_dim]
+//attn_val(输出)：[seq_len, nhead, v_head_dim]
 template<typename T>
 void self_attention_kernel(
     T* attn_val,
@@ -20,13 +24,13 @@ void self_attention_kernel(
     size_t v_head_dim,
     float scale
 ){
-    // 一个KV head负责group_szie个Qhead
+    // 表示每个 KV head 服务多少个 Q head
     size_t group_size = nhead / kv_head;
 
     //之前一共有total_len个数据
     std::vector<float> scores(total_len);
 
-    //遍历Q头
+    //遍历Q头，计算该head对应的KV head索引
     for (size_t h = 0;h < nhead;h++)
     {
         // 当前Q头对应的kvhead
@@ -64,7 +68,7 @@ void self_attention_kernel(
             //当前最大值初值赋值为负无穷
             float max_val = -std::numeric_limits<float>::infinity();
 
-            // 开始对未知的token进行处理（因果掩码）
+            // 开始对未知的token进行处理（因果掩码） 同时求最大值
             for(size_t t = 0;t < total_len;t++){
                 if (t > current_pos){
                     scores[t] = -std::numeric_limits<float>::infinity();
@@ -73,7 +77,7 @@ void self_attention_kernel(
                     max_val = scores[t];
             }
             float sum_exp = 0.0f;
-            // 负无穷的为未来的token，此时其注意力分数为0
+            // 负无穷的为未来的token，此时其注意力分数为0，其他的进行softmax处理
             for (size_t t = 0;t < total_len;t++){
                 if (scores[t] == -std::numeric_limits<float>::infinity()){
                     scores[t] = 0.0f;

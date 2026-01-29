@@ -10,5 +10,5 @@ namespace llaisys::ops::cpu{
         const std::byte* gate_ptr,
         const std::byte* up_ptr,
         size_t numel
-    );
+    ); 
 } 

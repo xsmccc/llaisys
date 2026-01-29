@@ -1,6 +1,7 @@
 #include "llaisys_tensor.hpp"
 
 #include <vector>
+// C API 包装层，提供对 Tensor 类的访问接口
 
 __C {
     llaisysTensor_t tensorCreate(
@@ -9,7 +10,11 @@ __C {
         llaisysDataType_t dtype,
         llaisysDeviceType_t device_type,
         int device_id) {
+        
+        // 将 C 数组转换为 C++ vector
         std::vector<size_t> shape_vec(shape, shape + ndim);
+
+        
         return new LlaisysTensor{llaisys::Tensor::create(shape_vec, dtype, device_type, device_id)};
     }
 

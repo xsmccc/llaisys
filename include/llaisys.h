@@ -10,7 +10,7 @@
 #endif
 
 #ifdef __cplusplus
-#define __C extern "C"
+#define __C extern "C"  //C语言连接修饰符
 #include <cstddef>
 #include <cstdint>
 #else
