@@ -15,7 +15,7 @@ void swiglu_kernel(
         float g = llaisys::utils::cast<float>(gate_ptr[i]);
         float u = llaisys::utils::cast<float>(up_ptr[i]);
 
-        float silu_val = g / (1.0 + std::exp(-g));
+        float silu_val = g / (1.0f + std::exp(-g));
         float res  = u * silu_val;
         out_ptr[i] = llaisys::utils::cast<T>(res);
     }
