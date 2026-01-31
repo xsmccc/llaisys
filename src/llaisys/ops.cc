@@ -2,6 +2,7 @@
 
 #include "llaisys_tensor.hpp"
 
+// 导入所有 ops 实现
 #include "../ops/add/op.hpp"
 #include "../ops/argmax/op.hpp"
 #include "../ops/embedding/op.hpp"
@@ -14,6 +15,7 @@
 
 //保持函数名不动  方便python的ctypes库寻找
 __C {
+    // 解包C句柄为C++对象，随后调用C++实现
     void llaisysAdd(llaisysTensor_t c, llaisysTensor_t a, llaisysTensor_t b) {
         llaisys::ops::add(c->tensor, a->tensor, b->tensor);
     }

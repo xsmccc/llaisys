@@ -14,25 +14,41 @@ __C {
         // 将 C 数组转换为 C++ vector
         std::vector<size_t> shape_vec(shape, shape + ndim);
 
-        
+        // 调用C++张量创建函数
+        // 初始化张量对象
+        // 包装为C句柄
         return new LlaisysTensor{llaisys::Tensor::create(shape_vec, dtype, device_type, device_id)};
     }
 
+    // 张量销毁
+    // 张量析构时：
+    // ├─ Tensor 对象析构
+    // │  └─ _storage (shared_ptr) 析构
+    // │     └─ Storage 析构
+    // │        └─ _runtime.freeStorage(this)
+    // │           └─ api->free_device(ptr)
+    // │              └─► cudaFree(ptr)  ◄─── 实际释放显存
+    // │
+    // └─ LlaisysTensor 销毁
     void tensorDestroy(
         llaisysTensor_t tensor) {
         delete tensor;
     }
 
+    // 数据指针查询
+    // Python 获取张量数据指针
     void *tensorGetData(
         llaisysTensor_t tensor) {
         return tensor->tensor->data();
     }
 
+    
     size_t tensorGetNdim(
         llaisysTensor_t tensor) {
         return tensor->tensor->ndim();
     }
 
+    // Shape 查询
     void tensorGetShape(
         llaisysTensor_t tensor,
         size_t * shape) {
@@ -70,12 +86,14 @@ __C {
         return uint8_t(tensor->tensor->isContiguous());
     }
 
+    // 数据加载
     void tensorLoad(
         llaisysTensor_t tensor,
         const void *data) {
         tensor->tensor->load(data);
     }
 
+    // 张量视图变形
     llaisysTensor_t tensorView(
         llaisysTensor_t tensor,
         size_t * shape,

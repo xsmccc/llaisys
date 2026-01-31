@@ -31,6 +31,7 @@ void memcpyAsync(void *dst, const void *src, size_t size, llaisysMemcpyKind_t ki
     memcpySync(dst, src, size, kind);  // CPU 没有真正的异步，退化为同步
 }
 
+// 这是干嘛？？
 static const LlaisysRuntimeAPI RUNTIME_API = {
     &getDeviceCount,
     &setDevice,

@@ -3,7 +3,6 @@ import torch
 from test_utils import *
 import argparse
 
-
 def test_basic_runtime_api(device_name: str = "cpu"):
 
     api = llaisys.RuntimeAPI(llaisys_device(device_name))

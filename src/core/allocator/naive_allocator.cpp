@@ -10,6 +10,8 @@ NaiveAllocator::NaiveAllocator(const LlaisysRuntimeAPI *runtime_api) : MemoryAll
 // 分配 → 调用设备的 malloc_device
 std::byte *NaiveAllocator::allocate(size_t size) {
     return static_cast<std::byte *>(_api->malloc_device(size));
+    //                              ^^^^^^ 这个 _api 继承自父类
+    //                                    指向 CPU 或 NVIDIA 的 malloc_device
 }
 
 // 释放 → 调用设备的 free_device

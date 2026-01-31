@@ -5,6 +5,7 @@
 namespace llaisys::core {
 
 Context::Context() {
+
     // 列举设备类型（优先非 CPU，最后 CPU 作后备）
     std::vector<llaisysDeviceType_t> device_typs;
     for (int i = 1; i < LLAISYS_DEVICE_TYPE_COUNT; i++) {
@@ -27,6 +28,7 @@ Context::Context() {
                 runtime->_activate();
                 runtimes_[device_id] = runtime;
                 _current_runtime = runtime;
+                // 之后的设备不再创建（延迟初始化）
             }
         }
         _runtime_map[device_type] = runtimes_;
@@ -34,15 +36,16 @@ Context::Context() {
 }
 
 Context::~Context() {
-    // Destroy current runtime first.
+    // 删除当前激活的 Runtime   这会触发 Runtime 析构，释放 stream、allocator、...
     delete _current_runtime;
 
+    // 删除其他所有 Runtime
     for (auto &runtime_entry : _runtime_map) {
         std::vector<Runtime *> runtimes = runtime_entry.second;
         for (auto runtime : runtimes) {
             if (runtime != nullptr && runtime != _current_runtime) {
-                runtime->_activate();
-                delete runtime;
+                runtime->_activate();   // 激活后再删（某些设备需要）
+                delete runtime;         // 然后删除
             }
         }
         runtimes.clear();
@@ -68,6 +71,7 @@ void Context::setDevice(llaisysDeviceType_t device_type, int device_id) {
 
         // 如果目标设备的 Runtime 不存在，创建它
         if (runtimes[device_id] == nullptr) {
+            // 第一次切换到这个设备时才创建
             runtimes[device_id] = new Runtime(device_type, device_id);
         }
 
@@ -83,9 +87,14 @@ Runtime &Context::runtime() {
     return *_current_runtime;
 }
 
-// 全局函数
+// 全局函数 小写c，不是构造函数
 Context &context() {
     thread_local Context thread_context;    //每个线程独立的context
+    //     ↑
+    //  thread_local: C++ 关键字
+    //  每个线程都会在第一次调用 context() 时
+    //  创建独立的 Context 对象
+    //  之后每次调用都返回同一个
     return thread_context;
 }
 
