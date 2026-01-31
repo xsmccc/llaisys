@@ -169,7 +169,7 @@ void Tensor::debug() const {
 bool Tensor::isContiguous() const {
     if (_meta.shape.empty()) return true;
     size_t accumulated = 1;
-    for (int i = _meta.shape.size() - 1; i >= 0; --i) {
+    for (size_t i = _meta.shape.size(); i-- > 0;) {
         // _meta.strides[i] 是 ptrdiff_t，这里强转一下比较
         if ((size_t)_meta.strides[i] != accumulated) {
             return false;
@@ -191,7 +191,7 @@ tensor_t Tensor::permute(const std::vector<size_t> &order) const {
 
     new_stride.resize(_meta.strides.size());
     new_shape.resize(_meta.shape.size());
-    int i = 0;
+    size_t i = 0;
 
     for (size_t d : order){
         if (d >= _meta.shape.size()){
@@ -226,7 +226,7 @@ tensor_t Tensor::view(const std::vector<size_t> &shape) const {
     
     std::vector<ptrdiff_t> new_strides(shape.size());
     size_t stride = 1;
-    for(int i = shape.size()-1;i >= 0;--i){
+    for (size_t i = shape.size(); i-- > 0;) {
         new_strides[i] = static_cast<ptrdiff_t>(stride);
         stride *= shape[i];
     }
