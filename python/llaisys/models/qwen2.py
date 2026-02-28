@@ -135,15 +135,15 @@ class Qwen2:
             return
 
         try:
-            # 创建Tensor对象
+            # 创建Tensor对象（在模型所在设备上）
             llaisys_tensor = Tensor(
                 shape=array.shape,      # 形状
                 dtype=DataType.F32,     # 数据类型
-                device=DeviceType.CPU   # 放在CPU上先
+                device=self.device      # 使用模型所在设备（CPU或NVIDIA）
             )
             # 获取numpy数组的内存地址
             data_ptr = array.ctypes.data_as(ctypes.c_void_p)
-            # 将numpy数据加载到LLAISYS Tensor
+            # 将numpy数据加载到LLAISYS Tensor（load内部会做H2D拷贝）
             llaisys_tensor.load(data_ptr)
         except Exception as e:
             print(f"Error creating tensor for {name}: {e}")

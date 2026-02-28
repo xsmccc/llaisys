@@ -4,6 +4,7 @@
 #include "components.hpp"
 #include "../../ops/add/op.hpp"
 #include "../../ops/argmax/op.hpp"
+#include "../../device/runtime_api.hpp"
 #include <vector>
 #include <memory>
 #include <iostream>
@@ -13,8 +14,8 @@ using namespace llaisys;
 
 class Qwen2Model {
 public:
-    Qwen2Model(const LlaisysQwen2Meta* meta)
-        : config_(*meta),
+    Qwen2Model(const LlaisysQwen2Meta* meta, llaisysDeviceType_t device, int device_id = 0)
+        : config_(*meta, device, device_id),
           embed_(),
           final_norm_(config_.rms_norm_eps),
           lm_head_()
@@ -56,9 +57,11 @@ public:
             }
 
             // 1. Embedding
+            // 在目标设备上创建 token 张量，用 load() 从主机拷贝数据
             std::vector<size_t> token_shape = {1};
-            auto token_tensor = Tensor::create(token_shape, LLAISYS_DTYPE_I64, LLAISYS_DEVICE_CPU, 0);
-            *reinterpret_cast<int64_t*>(token_tensor->data()) = token_ids[i];
+            auto token_tensor = Tensor::create(token_shape, LLAISYS_DTYPE_I64, config_.device_type, config_.device_id);
+            int64_t token_val = token_ids[i];
+            token_tensor->load(&token_val);
 
             auto hidden_state = embed_.forward(token_tensor);
 
@@ -76,13 +79,20 @@ public:
             if (i == ntoken - 1) {
                 auto logits = lm_head_.forward(hidden_state);
 
-                // Argmax to get next token
-                auto out_idx = Tensor::create({1}, LLAISYS_DTYPE_I64, LLAISYS_DEVICE_CPU, 0);
-                auto out_val = Tensor::create({1}, logits->dtype(), LLAISYS_DEVICE_CPU, 0);
+                // Argmax 取下一个 token
+                // 在相同设备上创建输出张量
+                auto out_idx = Tensor::create({1}, LLAISYS_DTYPE_I64, config_.device_type, config_.device_id);
+                auto out_val = Tensor::create({1}, logits->dtype(), config_.device_type, config_.device_id);
 
                 ops::argmax(out_idx, out_val, logits);
 
-                output_token = *reinterpret_cast<int64_t*>(out_idx->data());
+                // 将结果从设备拷回主机
+                if (config_.device_type != LLAISYS_DEVICE_CPU) {
+                    const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(config_.device_type);
+                    api->memcpy_sync(&output_token, out_idx->data(), sizeof(int64_t), LLAISYS_MEMCPY_D2H);
+                } else {
+                    output_token = *reinterpret_cast<int64_t*>(out_idx->data());
+                }
             }
         }
 
@@ -174,7 +184,7 @@ __export struct LlaisysQwen2Model *llaisysQwen2ModelCreate(
     int ndevice)
 {
     auto model = new LlaisysQwen2Model();
-    model->impl = std::make_unique<Qwen2Model>(meta);
+    model->impl = std::make_unique<Qwen2Model>(meta, device, device_ids ? device_ids[0] : 0);
     return model;
 }
 

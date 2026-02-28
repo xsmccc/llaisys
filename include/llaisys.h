@@ -53,7 +53,7 @@ typedef enum {
 
 // Runtime Types
 // Stream
-typedef void *llaisysStream_t;
+typedef void *llaisysStream_t; //通用流类型，具体实现由不同设备定义 不透明指针类型
 
 // Memory Copy Directions
 typedef enum {

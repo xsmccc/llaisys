@@ -2,6 +2,8 @@
 #include "../../../utils.hpp"
 
 #include <cmath>
+#include <omp.h>  // OpenMP 头文件
+
 //float32精度不够...
 template <typename T>
 void rope_kernel(
@@ -15,16 +17,18 @@ void rope_kernel(
 ){
     size_t half_dim = head_dim / 2;
     
-    //遍历seq
+    // OpenMP 并行化：对序列和注意力头进行二维并行
+    // collapse(2): 将两层循环合并为一个并行区域
+    #pragma omp parallel for collapse(2) schedule(static)
     for (size_t i = 0;i < seq_len;i++)
     {
-        int64_t p = pos_ids[i];
-
         //遍历head
         for (size_t h=0;h < n_heads;h++)
         {
+            int64_t p = pos_ids[i];
             size_t offset = i * n_heads * head_dim + h * head_dim;
 
+            // 内层循环计算旋转（每个线程独立处理一个 seq×head）
             for (size_t j = 0;j < half_dim;j++)
             {
                 //计算角度

@@ -2,6 +2,7 @@
 #include "../../../utils.hpp"
 
 #include <cmath>
+#include <omp.h>  // OpenMP 头文件
 
 template<typename T>
 void swiglu_kernel(
@@ -10,11 +11,15 @@ void swiglu_kernel(
     const T* up_ptr,
     size_t numel
 ){
+    // OpenMP 并行化：每个元素独立计算
+    // schedule(static): 静态调度，适合计算量均匀的任务
+    #pragma omp parallel for schedule(static)
     for (size_t i = 0;i < numel;i++)
     {
         float g = llaisys::utils::cast<float>(gate_ptr[i]);
         float u = llaisys::utils::cast<float>(up_ptr[i]);
 
+        // SiLU(x) = x / (1 + exp(-x))
         float silu_val = g / (1.0f + std::exp(-g));
         float res  = u * silu_val;
         out_ptr[i] = llaisys::utils::cast<T>(res);

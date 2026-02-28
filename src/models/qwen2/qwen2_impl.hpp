@@ -18,11 +18,13 @@ struct Qwen2Config {
     float rms_norm_eps;
     float rope_theta;
     int64_t end_token_id;
+    llaisysDeviceType_t device_type = LLAISYS_DEVICE_CPU; // 推理设备
+    int device_id = 0;
 
     Qwen2Config() = default;
 
     // 将C结构体转换为C++结构体
-    Qwen2Config(const LlaisysQwen2Meta& meta) {
+    Qwen2Config(const LlaisysQwen2Meta& meta, llaisysDeviceType_t dev = LLAISYS_DEVICE_CPU, int dev_id = 0) {
         vocab_size = meta.voc;
         hidden_size = meta.hs;
         intermediate_size = meta.di;
@@ -34,6 +36,8 @@ struct Qwen2Config {
         rms_norm_eps = meta.epsilon;
         rope_theta = meta.theta;
         end_token_id = meta.end_token;
+        device_type = dev;
+        device_id = dev_id;
     }
 
     size_t kv_dim() const {

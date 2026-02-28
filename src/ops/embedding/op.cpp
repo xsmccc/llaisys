@@ -4,6 +4,9 @@
 #include "../../utils.hpp"
 
 #include "cpu/embedding_cpu.hpp"
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/embedding_nvidia.hpp"
+#endif
 //Embedding层实现
 /*
 weight——shape[Vocab_Size,Hidden_Dim]
@@ -37,8 +40,11 @@ void embedding(tensor_t out, tensor_t index, tensor_t weight) {
         );
     #ifdef ENABLE_NVIDIA_API
         case LLAISYS_DEVICE_NVIDIA:
-            TO_BE_IMPLEMENTED();
-            return;
+            return nvidia::embedding(
+                out->data(), out->dtype(),
+                index->data(), num_indices, index->dtype(),
+                weight->data(), vocab_size, embedding_dim
+            );
     #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;

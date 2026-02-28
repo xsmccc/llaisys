@@ -4,6 +4,9 @@
 #include "../../utils.hpp"
 
 #include "cpu/argmax_cpu.hpp" // 引用 CPU 实现头文件
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/argmax_nvidia.hpp"
+#endif
 
 //传入max_idx max_val是对象，然后将结果传入参数接口
 // max_idx：输出索引 
@@ -31,8 +34,11 @@ void argmax(tensor_t max_idx, tensor_t max_val, tensor_t vals) {
         
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
-        return;
+        return nvidia::argmax(
+            max_idx->data(), max_idx->dtype(),
+            max_val->data(),
+            vals->data(), vals->dtype(), vals->numel()
+        );
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;

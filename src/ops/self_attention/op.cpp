@@ -3,6 +3,11 @@
 #include "../../utils.hpp"
 
 #include "cpu/self_attention_cpu.hpp"
+
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/self_attention_nvidia.hpp"
+#endif
+
 /*
 维度检查
 连续性检查
@@ -59,8 +64,16 @@ void self_attention(tensor_t attn_val, tensor_t q, tensor_t k, tensor_t v, float
         );
     #ifdef ENABLE_NVIDIA_API
         case LLAISYS_DEVICE_NVIDIA:
-            TO_BE_IMPLEMENTED();
-            return;
+            return nvidia::self_attention(
+                attn_val->data(), attn_val->dtype(),
+                q->data(),
+                k->data(),
+                v->data(),
+                seq_len, total_len,
+                nhead, kv_head,
+                head_dim, v_head_dim,
+                scale
+            );
     #endif
         default:
             EXCEPTION_UNSUPPORTED_DEVICE;

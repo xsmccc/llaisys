@@ -3,6 +3,8 @@
 
 #include "../llaisys.h"
 
+// 统一的Runtime API接口定义层
+// 策略模式实现不同硬件设备的运行时支持
 __C {
     // Runtime API Functions
     // Device

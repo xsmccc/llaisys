@@ -3,6 +3,7 @@
 #include "qwen2_impl.hpp"
 #include "../../ops/rope/op.hpp"
 #include "../../ops/self_attention/op.hpp"
+#include "../../device/runtime_api.hpp"
 #include <cmath>
 
 namespace llaisys {
@@ -38,13 +39,14 @@ public:
         auto v_3d = v_2d->view(kv_shape);
 
         // RoPE 位置编码 创建位置张量
+        // 先在主机端准备好 pos 数据，然后用 load() 拷到设备上
         std::vector<size_t> pos_shape = {x->shape()[0]};
-        auto pos_tensor = Tensor::create(pos_shape, LLAISYS_DTYPE_I64, LLAISYS_DEVICE_CPU, 0);
-        int64_t* pos_ptr = reinterpret_cast<int64_t*>(pos_tensor->data());
-        // pos-表示当前token是序列中的第几个
+        std::vector<int64_t> pos_host(pos_shape[0]);
         for (size_t i = 0; i < pos_shape[0]; i++) {
-            pos_ptr[i] = static_cast<int64_t>(pos + i);
+            pos_host[i] = static_cast<int64_t>(pos + i);
         }
+        auto pos_tensor = Tensor::create(pos_shape, LLAISYS_DTYPE_I64, config_.device_type, config_.device_id);
+        pos_tensor->load(pos_host.data());
 
         // 应用RoPE
         // 在高纬空间中对向量进行旋转，旋转角度取决于token的位置，从而将位置信息编码到向量中
@@ -101,8 +103,9 @@ private:
             config_.head_dim                //170
         };
 
-        k_cache_ = Tensor::create(shape, LLAISYS_DTYPE_F32, LLAISYS_DEVICE_CPU, 0);
-        v_cache_ = Tensor::create(shape, LLAISYS_DTYPE_F32, LLAISYS_DEVICE_CPU, 0);
+        // KV Cache 分配在模型所在设备上
+        k_cache_ = Tensor::create(shape, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        v_cache_ = Tensor::create(shape, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
     }
 
     void update_cache(tensor_t cache, tensor_t update, size_t pos) {
@@ -118,8 +121,13 @@ private:
         // update的数据
         uint8_t* src = reinterpret_cast<uint8_t*>(update->data());
 
-        //内存复制进去
-        std::memcpy(dst, src, row_size);
+        // 使用设备感知的内存拷贝（CPU 用 memcpy，GPU 用 cudaMemcpy D2D）
+        if (config_.device_type == LLAISYS_DEVICE_CPU) {
+            std::memcpy(dst, src, row_size);
+        } else {
+            const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(config_.device_type);
+            api->memcpy_sync(dst, src, row_size, LLAISYS_MEMCPY_D2D);
+        }
     }
 };
 

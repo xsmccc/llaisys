@@ -2,6 +2,7 @@
 #include "../../../utils.hpp"
 
 #include <cmath>
+#include <omp.h>  // OpenMP 头文件
 
 template <typename T>
 void rms_norm_kernel(
@@ -11,12 +12,17 @@ void rms_norm_kernel(
     size_t rows,
     size_t cols,
     float eps
+
 ){
+    // OpenMP 并行化：每个线程处理不同的行
+    // 行之间没有数据依赖，可以安全并行
+    #pragma omp parallel for schedule(static)
     for (size_t i = 0;i<rows;i++)
     {
         const T* in_ptr = in + i * cols;
         T* out_ptr = out + i * cols;
         float sum_seq = 0.0f;
+        // 内层循环计算 RMS（单线程执行，因为需要累加） 后续可进行SIMD优化
         for (size_t j = 0;j < cols;j++)
         {
             float val = llaisys::utils::cast<float>(in_ptr[j]);
@@ -25,6 +31,7 @@ void rms_norm_kernel(
         float rms = std::sqrt(sum_seq / cols + eps);
         float inv_rms = 1.0f / rms;
 
+        // 归一化和缩放（单线程执行当前行） 后续可进行SIMD优化
         for (size_t j = 0;j < cols;j++)
         {
             float val = llaisys::utils::cast<float>(in_ptr[j]);
