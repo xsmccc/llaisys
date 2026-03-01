@@ -90,3 +90,8 @@ ehthumbs.db
 desktop.ini
 
 models/
+
+# Local study notes / experiments (do not upload)
+docs/GPU_INFERENCE_OPTIMIZATION.md
+learning/
+scripts/

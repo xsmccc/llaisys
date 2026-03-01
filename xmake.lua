@@ -13,6 +13,12 @@ option("nv-gpu") -- 定义是否启用 NVIDIA GPU 的构建开关
     set_description("Whether to compile implementations for Nvidia GPU") -- 选项说明
 option_end() -- 结束选项定义
 
+option("cuda-arch") -- CUDA GPU 架构版本
+    set_default("sm_89") -- 默认 sm_89 (RTX 40 系列)，A100 用 sm_80，V100 用 sm_70
+    set_showmenu(true)
+    set_description("CUDA GPU architecture (e.g. sm_70, sm_80, sm_89)")
+option_end()
+
 if has_config("nv-gpu") then -- 如果启用 nv-gpu 选项
     add_defines("ENABLE_NVIDIA_API") -- 添加宏定义以开启 NVIDIA API
     includes("xmake/nvidia.lua") -- 引入 NVIDIA 相关构建配置
@@ -127,11 +133,18 @@ target("llaisys") -- 定义最终共享库目标
     -- 检查是否启用了CUDA支持
     if has_config("nv-gpu") then -- 若启用 GPU
         add_languages("cuda") -- 启用 CUDA 语言
+        -- 禁用 RDC（relocatable device code）减少额外显存占用
+        set_values("cuda.rdc", false)
+        set_policy("build.cuda.devlink", false)
         add_files("src/device/nvidia/*.cu") -- 添加 NVIDIA CUDA 源码
-        add_cuflags("-arch=sm_89", "-Xcompiler -fPIC", {tools = "nvcc"}) -- 设置架构与 PIC
-        add_linkdirs("/usr/local/cuda-12.6/lib64")  -- CUDA库路径
-        add_links("cudart", "cublas") -- 连接libcudart.so (cuda runtime 库) + cuBLAS
-        add_rpathdirs("/usr/local/cuda-12.6/lib64") -- 运行时库查找路径
+        -- 使用可配置的 GPU 架构（通过 xmake f --cuda-arch=sm_XX 设置）
+        local arch = get_config("cuda-arch") or "sm_89"
+        add_cuflags("-arch=" .. arch, "-Xcompiler -fPIC", {tools = "nvcc"}) -- 设置架构与 PIC
+        -- 自动检测 CUDA 安装路径
+        local cuda_path = os.getenv("CUDA_PATH") or os.getenv("CUDA_HOME") or "/usr/local/cuda"
+        add_linkdirs(cuda_path .. "/lib64")  -- CUDA 库路径
+        add_links("cudart", "cublas") -- 连接 libcudart.so (CUDA Runtime) + cuBLAS
+        add_rpathdirs(cuda_path .. "/lib64") -- 运行时库查找路径
     else
         -- Only CPU device when CUDA is not enabled
         add_deps("llaisys-device") -- 仅依赖 CPU 设备实现

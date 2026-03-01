@@ -27,21 +27,17 @@ public:
         weight_ = cast_handle(w_handle);
     }
 
-    
+    // 使用预分配输出张量的版本
+    void forward(tensor_t output, tensor_t input) {
+        if (!weight_) return;
+        ops::embedding(output, input, weight_);
+    }
+
     tensor_t forward(tensor_t input) {
         if (!weight_) return nullptr;
-
-        // 计算输出维度和形状
         std::vector<size_t> out_shape = input->shape();
         out_shape.push_back(weight_->shape()[1]);
-
-        auto out = Tensor::create(
-            out_shape,
-            weight_->dtype(),
-            weight_->deviceType(),
-            weight_->deviceId()
-        );
-
+        auto out = Tensor::create(out_shape, weight_->dtype(), weight_->deviceType(), weight_->deviceId());
         ops::embedding(out, input, weight_);
         return out;
     }
@@ -51,73 +47,66 @@ private:
 };
 
 // 归一化隐藏层状态 使数值稳定
-// 输入：[seq_len, hidden_size]
-// 权重：[hidden_size]
-// 输出：[seq_len, hidden_size]
 class RMSNorm {
 public:
     RMSNorm(float eps = 1e-6) : eps_(eps) {}
 
-    // 获得归一化权重
     void set_weight(void* w_handle) {
         weight_ = cast_handle(w_handle);
     }
 
+    // 使用预分配输出张量
+    void forward(tensor_t output, tensor_t input) {
+        if (!weight_) return;
+        ops::rms_norm(output, input, weight_, eps_);
+    }
+
     tensor_t forward(tensor_t input) {
         if (!weight_) return nullptr;
-
-        auto out = Tensor::create(
-            input->shape(),
-            input->dtype(),
-            input->deviceType(),
-            input->deviceId()
-        );
-
+        auto out = Tensor::create(input->shape(), input->dtype(), input->deviceType(), input->deviceId());
         ops::rms_norm(out, input, weight_, eps_);
         return out;
     }
 
 private:
     tensor_t weight_;
-    float eps_; // 防止除以0
+    float eps_;
 };
 
 // 线性变换层
-// 输入：[seq_len, in_features]
-// 权重：[out_features, in_features]
-// 偏置：[out_features]
-// 输出：[seq_len, out_features]
 class Linear {
 public:
     Linear() = default;
 
     void set_params(void* w_handle, void* b_handle = nullptr) {
         weight_ = cast_handle(w_handle);
-        if (b_handle) { // 偏置可能存在
+        if (b_handle) {
             bias_ = cast_handle(b_handle);
         }
     }
 
+    // 使用预分配输出张量
+    void forward(tensor_t output, tensor_t input) {
+        if (!weight_) return;
+        ops::linear(output, input, weight_, bias_);
+    }
+
     tensor_t forward(tensor_t input) {
         if (!weight_) return nullptr;
-
         std::vector<size_t> out_shape = input->shape();
         out_shape.back() = weight_->shape()[0];
-
-        auto out = Tensor::create(
-            out_shape,
-            input->dtype(),
-            input->deviceType(),
-            input->deviceId()
-        );
-
+        auto out = Tensor::create(out_shape, input->dtype(), input->deviceType(), input->deviceId());
         ops::linear(out, input, weight_, bias_);
         return out;
     }
 
+    size_t out_features() const {
+        return weight_ ? weight_->shape()[0] : 0;
+    }
+
 private:
-    tensor_t weight_;  // [out_features, in_features]
-    tensor_t bias_;    // [out_features]
+    tensor_t weight_;
+    tensor_t bias_;
 };
 
 } // namespace llaisys

@@ -4,6 +4,7 @@
 #include "../../ops/rope/op.hpp"
 #include "../../ops/self_attention/op.hpp"
 #include "../../device/runtime_api.hpp"
+#include "../../core/llaisys_core.hpp"
 #include <cmath>
 
 namespace llaisys {
@@ -12,6 +13,7 @@ class Qwen2Attention {
 public:
     Qwen2Attention(const Qwen2Config& config) : config_(config) {
         init_kv_cache();
+        init_workspace();
     }
 
     void set_params(void* q_w, void* k_w, void* v_w, void* o_w,
@@ -19,114 +21,109 @@ public:
         q_proj_.set_params(q_w, q_b);
         k_proj_.set_params(k_w, k_b);
         v_proj_.set_params(v_w, v_b);
-        o_proj_.set_params(o_w);    //无偏置输出投影
+        o_proj_.set_params(o_w);
     }
 
-    tensor_t forward(tensor_t x, size_t pos) {
-        // Q, K, V 投影
-        // 将输入线性变换到Q,K,V空间
-        auto q_2d = q_proj_.forward(x);
-        auto k_2d = k_proj_.forward(x);
-        auto v_2d = v_proj_.forward(x);
+    // 优化版 forward：接受外部传入的 pos_tensor（每 token 只创建一次）
+    tensor_t forward(tensor_t x, size_t pos, tensor_t pos_tensor) {
+        // Q, K, V 投影 — 使用预分配输出张量
+        q_proj_.forward(ws_q_2d_, x);
+        k_proj_.forward(ws_k_2d_, x);
+        v_proj_.forward(ws_v_2d_, x);
 
-        // Reshape 为多头格式
-        // 采用多头注意力可以从不同的角度看问题，得到更完善的表示
-        std::vector<size_t> q_shape = {x->shape()[0], config_.num_attention_heads, config_.head_dim};
-        std::vector<size_t> kv_shape = {x->shape()[0], config_.num_key_value_heads, config_.head_dim};
+        // Reshape 为多头格式（view 不分配新内存）
+        auto q_3d = ws_q_2d_->view(q_shape_);
+        auto k_3d = ws_k_2d_->view(kv_shape_);
+        auto v_3d = ws_v_2d_->view(kv_shape_);
 
-        auto q_3d = q_2d->view(q_shape);
-        auto k_3d = k_2d->view(kv_shape);
-        auto v_3d = v_2d->view(kv_shape);
+        // 应用RoPE — 使用预分配输出张量
+        ops::rope(ws_q_rope_, q_3d, pos_tensor, config_.rope_theta);
+        ops::rope(ws_k_rope_, k_3d, pos_tensor, config_.rope_theta);
 
-        // RoPE 位置编码 创建位置张量
-        // 先在主机端准备好 pos 数据，然后用 load() 拷到设备上
-        std::vector<size_t> pos_shape = {x->shape()[0]};
-        std::vector<int64_t> pos_host(pos_shape[0]);
-        for (size_t i = 0; i < pos_shape[0]; i++) {
-            pos_host[i] = static_cast<int64_t>(pos + i);
-        }
-        auto pos_tensor = Tensor::create(pos_shape, LLAISYS_DTYPE_I64, config_.device_type, config_.device_id);
-        pos_tensor->load(pos_host.data());
-
-        // 应用RoPE
-        // 在高纬空间中对向量进行旋转，旋转角度取决于token的位置，从而将位置信息编码到向量中
-        auto q_rope = Tensor::create(q_shape, q_3d->dtype(), q_3d->deviceType(), q_3d->deviceId());
-        auto k_rope = Tensor::create(kv_shape, k_3d->dtype(), k_3d->deviceType(), k_3d->deviceId());
-
-        ops::rope(q_rope, q_3d, pos_tensor, config_.rope_theta);
-        ops::rope(k_rope, k_3d, pos_tensor, config_.rope_theta);
-
-        // 更新KV缓存
-        update_cache(k_cache_, k_rope, pos);
+        // 更新KV缓存（GPU 用异步 D2D，CPU 用 memcpy）
+        update_cache(k_cache_, ws_k_rope_, pos);
         update_cache(v_cache_, v_3d, pos);
 
         // 自注意力计算
-        // 创建输出张量
-        auto attn_out_3d = Tensor::create(
-            q_shape, q_3d->dtype(), q_3d->deviceType(), q_3d->deviceId()
-        );
-
         float scale = 1.0f / std::sqrt(static_cast<float>(config_.head_dim));
-
-        // 获取有效的缓存部分
         auto k_valid = k_cache_->slice(0, 0, pos + 1);
         auto v_valid = v_cache_->slice(0, 0, pos + 1);
+        ops::self_attention(ws_attn_3d_, ws_q_rope_, k_valid, v_valid, scale);
 
-        ops::self_attention(attn_out_3d, q_rope, k_valid, v_valid, scale);
-
-        // Reshape 回2D
-        std::vector<size_t> out_shape = {x->shape()[0], config_.hidden_size};
-        auto attn_out_2d = attn_out_3d->view(out_shape);
-
-        // 将注意力输出映射回隐层维度
-        return o_proj_.forward(attn_out_2d);
+        // Reshape 回 2D 并通过 O 投影
+        auto attn_2d = ws_attn_3d_->view(out_2d_shape_);
+        o_proj_.forward(ws_o_out_, attn_2d);
+        return ws_o_out_;
     }
 
-    // 重置缓存——对于需要生成第二个序列的时候用的
-    void reset_cache() {
-        // Reset cache for new sequence
-        // Called at the start of generation
-        cache_pos_ = 0;
+    // 兼容旧接口
+    tensor_t forward(tensor_t x, size_t pos) {
+        std::vector<size_t> pos_shape = {x->shape()[0]};
+        std::vector<int64_t> pos_host(pos_shape[0]);
+        for (size_t i = 0; i < pos_shape[0]; i++)
+            pos_host[i] = static_cast<int64_t>(pos + i);
+        auto pos_tensor = Tensor::create(pos_shape, LLAISYS_DTYPE_I64, config_.device_type, config_.device_id);
+        pos_tensor->load(pos_host.data());
+        return forward(x, pos, pos_tensor);
     }
+
+    void reset_cache() { cache_pos_ = 0; }
 
 private:
-    Qwen2Config config_;    //配置信息
-    Linear q_proj_, k_proj_, v_proj_, o_proj_;  //4个投影层
-    tensor_t k_cache_;  //KEY cache
-    tensor_t v_cache_;  //Value Cache
-    size_t cache_pos_ = 0; //缓存位置-未使用
+    Qwen2Config config_;
+    Linear q_proj_, k_proj_, v_proj_, o_proj_;
+    tensor_t k_cache_, v_cache_;
+    size_t cache_pos_ = 0;
+
+    // 预分配的工作空间张量（decode 阶段 seq_len=1）
+    tensor_t ws_q_2d_, ws_k_2d_, ws_v_2d_;     // 线性投影输出
+    tensor_t ws_q_rope_, ws_k_rope_;            // RoPE 输出
+    tensor_t ws_attn_3d_;                       // 注意力输出
+    tensor_t ws_o_out_;                         // O 投影输出
+    std::vector<size_t> q_shape_, kv_shape_, out_2d_shape_;
 
     void init_kv_cache() {
         std::vector<size_t> shape = {
-            config_.max_position_embeddings,//4096
-            config_.num_key_value_heads,    //12
-            config_.head_dim                //170
+            config_.max_position_embeddings,
+            config_.num_key_value_heads,
+            config_.head_dim
         };
-
-        // KV Cache 分配在模型所在设备上
         k_cache_ = Tensor::create(shape, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
         v_cache_ = Tensor::create(shape, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
     }
 
+    void init_workspace() {
+        // 预分配 decode 阶段（seq_len=1）的所有中间张量
+        size_t hs = config_.hidden_size;
+        size_t kv_dim = config_.kv_dim();
+        q_shape_ = {1, config_.num_attention_heads, config_.head_dim};
+        kv_shape_ = {1, config_.num_key_value_heads, config_.head_dim};
+        out_2d_shape_ = {1, hs};
+
+        ws_q_2d_ = Tensor::create({1, hs}, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        ws_k_2d_ = Tensor::create({1, kv_dim}, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        ws_v_2d_ = Tensor::create({1, kv_dim}, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        ws_q_rope_ = Tensor::create(q_shape_, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        ws_k_rope_ = Tensor::create(kv_shape_, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        ws_attn_3d_ = Tensor::create(q_shape_, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        ws_o_out_ = Tensor::create({1, hs}, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+    }
+
     void update_cache(tensor_t cache, tensor_t update, size_t pos) {
-        // Copy update into cache at position pos
-        size_t bytes_per_elem = 4;  // F32
+        size_t bytes_per_elem = 4;
         if (update->dtype() == LLAISYS_DTYPE_F16) bytes_per_elem = 2;
         if (update->dtype() == LLAISYS_DTYPE_BF16) bytes_per_elem = 2;
-
         size_t row_size = config_.kv_dim() * bytes_per_elem;
-        
-        // 第pos行
         uint8_t* dst = reinterpret_cast<uint8_t*>(cache->data()) + row_size * pos;
-        // update的数据
         uint8_t* src = reinterpret_cast<uint8_t*>(update->data());
 
-        // 使用设备感知的内存拷贝（CPU 用 memcpy，GPU 用 cudaMemcpy D2D）
         if (config_.device_type == LLAISYS_DEVICE_CPU) {
             std::memcpy(dst, src, row_size);
         } else {
+            // 使用异步 D2D 拷贝，避免同步阻塞
             const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(config_.device_type);
-            api->memcpy_sync(dst, src, row_size, LLAISYS_MEMCPY_D2D);
+            llaisysStream_t stream = core::context().runtime().stream();
+            api->memcpy_async(dst, src, row_size, LLAISYS_MEMCPY_D2D, stream);
         }
     }
 };

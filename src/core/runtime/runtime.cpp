@@ -2,6 +2,7 @@
 
 #include "../../device/runtime_api.hpp"
 #include "../allocator/naive_allocator.hpp"
+#include "../allocator/caching_allocator.hpp"
 
 namespace llaisys::core {
 
@@ -18,9 +19,12 @@ Runtime::Runtime(llaisysDeviceType_t device_type, int device_id)
     //    ├─ CPU: 返回 nullptr
     //    └─ NVIDIA: 返回真实的 cudaStream_t
 
-
-    // 创建内存分配器（这里使用朴素分配器）
-    _allocator = new allocators::NaiveAllocator(_api);
+    // GPU 使用缓存分配器（避免反复 cudaMalloc/cudaFree），CPU 使用朴素分配器
+    if (_device_type == LLAISYS_DEVICE_CPU) {
+        _allocator = new allocators::NaiveAllocator(_api);
+    } else {
+        _allocator = new allocators::CachingAllocator(_api);
+    }
 }
 
 // 析构函数，释放分配器和流
@@ -103,8 +107,10 @@ llaisysStream_t Runtime::stream() const {
 }
 
 // 等待流上的所有任务完成
+// 注：当前所有 CUDA kernel 和 cuBLAS 都使用默认 stream (0)，
+// 而 runtime 创建的 stream 未被使用，因此这里用 device_synchronize 来确保同步。
 void Runtime::synchronize() const {
-    _api->stream_synchronize(_stream);
+    _api->device_synchronize();
 }
 
 } // namespace llaisys::core

@@ -29,8 +29,16 @@ except ImportError:
 
 
 class Qwen2:
-    def __init__(self, model_path, device: DeviceType = DeviceType.CPU):
-        """Initialize Qwen2 model and load weights from safetensors"""
+    def __init__(self, model_path, device: DeviceType = DeviceType.CPU, max_seq_len: int = 512):
+        """Initialize Qwen2 model and load weights from safetensors
+        
+        Args:
+            model_path: 模型文件夹路径
+            device: 计算设备 (CPU / NVIDIA)
+            max_seq_len: KV cache 最大序列长度（默认 512）。
+                         直接影响 GPU 显存占用：每层 KV cache = 2 × max_seq_len × nkvh × dh × 4B。
+                         8GB GPU 建议 512，A100 (80GB) 可设为 4096 甚至 131072。
+        """
         self.model_path = Path(model_path) # 模型文件夹路径
         self.device = device #计算设备
         self._kept_references = [] # 保持python对象引用，防止被回收
@@ -52,7 +60,14 @@ class Qwen2:
         self.meta.nh = config["num_attention_heads"]    # 注意力头数 (12)
         self.meta.nkvh = config["num_key_value_heads"]  # KV头数 (12)
         self.meta.di = config["intermediate_size"]      # MLP中间层大小
-        self.meta.maxseq = config["max_position_embeddings"]  # 最大序列长度
+        # KV cache 大小限制：使用 min(max_seq_len, 模型最大值) 以避免 GPU 显存溢出
+        # 原始模型 max_position_embeddings=131072 会导致 28层 KV cache 占用 ~7GB
+        model_max_seq = config["max_position_embeddings"]
+        actual_max_seq = min(max_seq_len, model_max_seq)
+        if actual_max_seq < model_max_seq:
+            print(f"[Qwen2] KV cache limited to {actual_max_seq} tokens "
+                  f"(model supports {model_max_seq})")
+        self.meta.maxseq = actual_max_seq
         self.meta.voc = config["vocab_size"]            # 词表大小
         self.meta.epsilon = config["rms_norm_eps"]      # RMSNorm epsilon
         self.meta.theta = config["rope_theta"]          # RoPE theta

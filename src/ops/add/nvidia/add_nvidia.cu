@@ -18,10 +18,11 @@
  *   2. 合并访存(Coalesced Access)：相邻线程访问相邻内存地址
  *   3. 使用原生向量加法指令：__hadd2 可在单指令内完成 2 个 half 加法
  * 
- * 【当前版本的不足】
- *   - 缺少 Grid-Stride Loop（大数据时 grid 过大、小数据时 wave 不足）
- *   - 缺少 __restrict__ 指针标注（编译器可能无法优化别名分析）
- *   - F16/BF16 只用 half2 (4B)，可改用 float4 搬运 8 个 half (16B)
+ * 【优化历史】
+ *   v1: 朴素标量 → v2: float4 向量化 → v3 (当前): Grid-Stride Loop + __restrict__
+ *   - Grid-Stride Loop: 固定 grid 大小，线程循环处理数据，解耦并行度与数据量
+ *   - __restrict__: 所有指针添加别名限定，允许编译器优化 load/store 重排
+ *   - F16/BF16: float4 宽搬运 (LD.128) + __hadd2 硬件向量加法
  * 
  * ============================================================================
  */
@@ -101,50 +102,54 @@ __device__ __forceinline__ llaisys::bf16_t from_cuda_bfloat16(__nv_bfloat16 b) {
  *   2. 更好地利用 L1/L2 cache line（64B/128B）
  *   3. 减少指令发射压力
  * 
- * 【线程映射】
- *   假设 numel = 1024，threads = 256，则 blocks = 1
- *   线程 0 处理 [0,1,2,3]，线程 1 处理 [4,5,6,7]，...
- *   相邻线程访问不相邻的 float4，但整体仍是合并访问
+ * 【线程映射 (Grid-Stride)】
+ *   固定 grid = SM数×8 个 block，每个 block 256 线程
+ *   stride = 总线程数，每个线程通过 i += stride 循环处理多组 float4
+ *   例：总线程 69632，数据 100M float4
+ *   线程 0: [0], [69632], [139264], ...
+ *   线程 1: [1], [69633], [139265], ...
+ *   相邻线程在同一轮访问相邻 float4，仍是合并访问
  */
-__global__ void add_kernel_f32_vec(float *c, const float *a, const float *b, size_t numel) {
-    // 计算当前线程的全局索引
-    // blockIdx.x: 当前 block 在 grid 中的索引 (0 ~ gridDim.x-1)
-    // blockDim.x: 每个 block 的线程数 (这里是 256)
-    // threadIdx.x: 当前线程在 block 内的索引 (0 ~ 255)
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // 每个线程处理 4 个连续的 float，计算起始位置
-    size_t base = idx * 4;
+__global__ void add_kernel_f32_vec(
+    float * __restrict__ c,
+    const float * __restrict__ a,
+    const float * __restrict__ b,
+    size_t numel
+) {
+    // Grid-Stride Loop:
+    //   tid    = 当前线程的全局唯一 ID
+    //   stride = grid 中的总线程数（固定值），每轮循环跳过这么多 vec4 组
+    //   这样无论数据有多大，都只用固定数量的 block，线程循环复用
+    size_t tid    = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = blockDim.x * gridDim.x;
 
-    // --- 向量化路径：一次处理 4 个 float ---
-    // 条件：确保 [base, base+3] 都在有效范围内
-    if (base + 3 < numel) {
-        // reinterpret_cast 将 float* 解释为 float4*
-        // 这告诉编译器生成 LD.128 / ST.128 指令
-        // 
-        // 【内存对齐要求】
-        //   float4 需要 16 字节对齐。如果输入数组是动态分配的（cudaMalloc），
-        //   CUDA 保证至少 256 字节对齐，所以 base=0 是安全的。
-        //   但 base=1 时地址不对齐，会导致未定义行为或性能下降。
-        //   当前代码假设输入已对齐（实际 tensor 从偏移 0 开始）
+    // --- Grid-Stride 主循环：每轮处理 1 个 float4 (= 4 个 float, 16B) ---
+    // (i + 1) * 4 <= numel 保证读取 4 个完整 float 不越界
+    for (size_t i = tid; (i + 1) * 4 <= numel; i += stride) {
+        size_t base = i * 4;
+
+        // LD.128：一次从 HBM 搬运 16 字节
+        // reinterpret_cast 告诉编译器生成宽 load 指令
+        // 【对齐】cudaMalloc 保证至少 256B 对齐，base=0 安全
         float4 a4 = *reinterpret_cast<const float4 *>(a + base);
         float4 b4 = *reinterpret_cast<const float4 *>(b + base);
-        
-        // float4 是结构体 {float x, y, z, w}
-        // 逐分量相加（编译器可能向量化为 FADD.F32x4，取决于体系结构）
+
+        // float4 = struct {float x, y, z, w}，逐分量加法
         float4 c4;
         c4.x = a4.x + b4.x;
         c4.y = a4.y + b4.y;
         c4.z = a4.z + b4.z;
         c4.w = a4.w + b4.w;
-        
-        // 将结果写回全局内存（ST.128 指令）
+
+        // ST.128：一次写回 16 字节
         *reinterpret_cast<float4 *>(c + base) = c4;
-    } 
-    // --- 标量路径：处理尾部 0~3 个剩余元素 ---
-    // 当 numel 不是 4 的倍数时，最后几个元素只能标量处理
-    else {
-        for (size_t i = base; i < numel && i < base + 4; ++i) {
+    }
+
+    // --- 尾部标量处理：numel 不是 4 的倍数时，最多剩 3 个元素 ---
+    // 只让 tid==0 处理，避免多线程重复写入
+    if (tid == 0) {
+        size_t tail_start = (numel / 4) * 4;
+        for (size_t i = tail_start; i < numel; ++i) {
             c[i] = a[i] + b[i];
         }
     }
@@ -178,22 +183,21 @@ __global__ void add_kernel_f16_vec(
     const llaisys::fp16_t * __restrict__ b,
     size_t numel
 ) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t base = idx * 8;  // 每线程处理 8 个 half (= 16B = 1 个 float4)
+    size_t tid    = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride  = blockDim.x * gridDim.x;
 
-    // --- float4 宽搬运路径：一次处理 8 个 half ---
-    if (base + 7 < numel) {
-        // LD.128：一次从全局内存搬运 16 字节
-        // 把 fp16_t* 地址解释为 float4*，读入 4 个 float（= 8 个 half）
+    // --- Grid-Stride 主循环：每轮处理 8 个 half (= 1 个 float4 = 16B) ---
+    for (size_t i = tid; (i + 1) * 8 <= numel; i += stride) {
+        size_t base = i * 8;
+
+        // LD.128：一次从全局内存搬运 16 字节 = 8 个 half
         float4 a_chunk = *reinterpret_cast<const float4 *>(a + base);
         float4 b_chunk = *reinterpret_cast<const float4 *>(b + base);
 
-        // 把 float4 拆解为 4 个 half2 做向量加法
-        // reinterpret_cast<__half2*> 不改变内存内容，只改变类型解释
+        // 把 float4 拆解为 4 个 half2 做 __hadd2 硬件向量加法
         __half2 *a_h2 = reinterpret_cast<__half2 *>(&a_chunk);
         __half2 *b_h2 = reinterpret_cast<__half2 *>(&b_chunk);
 
-        // 4 次 __hadd2 = 8 次 half 加法
         __half2 c_h2[4];
         c_h2[0] = __hadd2(a_h2[0], b_h2[0]);  // half[0,1]
         c_h2[1] = __hadd2(a_h2[1], b_h2[1]);  // half[2,3]
@@ -203,9 +207,11 @@ __global__ void add_kernel_f16_vec(
         // ST.128：一次写回 16 字节
         *reinterpret_cast<float4 *>(c + base) = *reinterpret_cast<float4 *>(c_h2);
     }
-    // --- 标量尾部处理：剩余 0~7 个 half ---
-    else {
-        for (size_t i = base; i < numel && i < base + 8; ++i) {
+
+    // --- 尾部标量处理 ---
+    if (tid == 0) {
+        size_t tail_start = (numel / 8) * 8;
+        for (size_t i = tail_start; i < numel; ++i) {
             __half ha = to_cuda_half(a[i]);
             __half hb = to_cuda_half(b[i]);
             c[i] = from_cuda_half(__hadd(ha, hb));
@@ -242,11 +248,13 @@ __global__ void add_kernel_bf16_vec(
     const llaisys::bf16_t * __restrict__ b,
     size_t numel
 ) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t base = idx * 8;  // 每线程处理 8 个 bf16 (= 16B = 1 个 float4)
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = blockDim.x * gridDim.x;
 
-    // --- float4 宽搬运路径 ---
-    if (base + 7 < numel) {
+    // --- Grid-Stride 主循环：每轮处理 8 个 bf16 (= 1 个 float4 = 16B) ---
+    for (size_t i = tid; (i + 1) * 8 <= numel; i += stride) {
+        size_t base = i * 8;
+
         float4 a_chunk = *reinterpret_cast<const float4 *>(a + base);
         float4 b_chunk = *reinterpret_cast<const float4 *>(b + base);
 
@@ -261,9 +269,11 @@ __global__ void add_kernel_bf16_vec(
 
         *reinterpret_cast<float4 *>(c + base) = *reinterpret_cast<float4 *>(c_h2);
     }
-    // --- 标量尾部处理 ---
-    else {
-        for (size_t i = base; i < numel && i < base + 8; ++i) {
+
+    // --- 尾部标量处理 ---
+    if (tid == 0) {
+        size_t tail_start = (numel / 8) * 8;
+        for (size_t i = tail_start; i < numel; ++i) {
             __nv_bfloat16 ba = to_cuda_bfloat16(a[i]);
             __nv_bfloat16 bb = to_cuda_bfloat16(b[i]);
             c[i] = from_cuda_bfloat16(__hadd(ba, bb));
@@ -275,40 +285,43 @@ __global__ void add_kernel_bf16_vec(
 // Kernel 启动器
 // ============================================================================
 /**
- * 【Grid/Block 配置策略】
+ * 【Grid/Block 配置策略 —— Grid-Stride Loop】
  * 
  * threads = 256 是经典选择：
  *   - 256 = 8 个 warp（每 warp 32 线程）
  *   - 大多数 GPU 每 SM 最多 2048 线程，256 线程/block 允许 8 个 block 并发
  *   - 占用率(occupancy)通常在 50%~100% 之间，取决于寄存器/shared memory 使用
  * 
- * blocks 计算：向上取整确保覆盖所有元素
- *   blocks = ceil(numel_vec / threads)
+ * blocks = NUM_SM × 8（固定值）：
+ *   - 不随数据量变化，线程通过循环复用（Grid-Stride Loop）
+ *   - NUM_SM 通过 cudaDeviceGetAttribute 在首次调用时查询并缓存
+ *   - RTX 4060 Ti: 34 SM × 8 = 272 blocks，总线程 = 69,632
+ *   - A100: 108 SM × 8 = 864 blocks，总线程 = 221,184
  * 
- * 【当前实现的问题】
- *   当 numel 很大（如 100M 元素）时：
- *     F32: numel_vec = 25M, blocks = 97657
- *   这会导致：
- *   1. kernel launch 开销增加
- *   2. 可能超过 1D grid 的最大 block 数限制（65535 on some configs）
- * 
- * 【更好的做法：Grid-Stride Loop】
- *   固定 grid 大小（如 SM数 × 8），让每个线程用循环处理多个元素。
- *   参见 SwiGLU 的实现。
+ * 优势（vs 旧版按数据量算 blocks）：
+ *   1. 大数据：不会产生 10 万个 block 的调度开销
+ *   2. 小数据：grid 本身就足够小，不浪费
+ *   3. 永远不会超过 grid 维度限制
  */
+/**
+ * 获取当前 GPU 的 SM 数量（首次调用时查询并缓存）
+ */
+int get_num_sm() {
+    static int num_sm = 0;
+    if (num_sm == 0) {
+        int device = 0;
+        cudaGetDevice(&device);
+        cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, device);
+    }
+    return num_sm;
+}
+
 void launch_add_kernel(std::byte *c, const std::byte *a, const std::byte *b, llaisysDataType_t type, size_t numel) {
-    constexpr int threads = 256;  // 每 block 256 线程 = 8 warps
+    constexpr int threads = 256;             // 每 block 256 线程 = 8 warps
+    const int blocks = get_num_sm() * 8;     // 固定 grid 大小 = SM数 × 8
     
     switch (type) {
     case LLAISYS_DTYPE_F32: {
-        // float4 向量化：每线程处理 4 个元素
-        // numel_vec = 需要的"向量化单元"数量
-        size_t numel_vec = (numel + 3) / 4;  // 向上取整
-        int blocks = static_cast<int>((numel_vec + threads - 1) / threads);
-        
-        // <<<blocks, threads>>> 是 CUDA kernel launch 语法
-        // blocks: grid 中的 block 数量（1D）
-        // threads: 每个 block 的线程数（1D）
         add_kernel_f32_vec<<<blocks, threads>>>(
             reinterpret_cast<float *>(c),
             reinterpret_cast<const float *>(a),
@@ -318,9 +331,6 @@ void launch_add_kernel(std::byte *c, const std::byte *a, const std::byte *b, lla
         break;
     }
     case LLAISYS_DTYPE_F16: {
-        // 【优化后】float4 宽搬运：每线程处理 8 个 half (16B)
-        size_t numel_vec = (numel + 7) / 8;  // 向上取整到 8 的倍数
-        int blocks = static_cast<int>((numel_vec + threads - 1) / threads);
         add_kernel_f16_vec<<<blocks, threads>>>(
             reinterpret_cast<llaisys::fp16_t *>(c),
             reinterpret_cast<const llaisys::fp16_t *>(a),
@@ -330,9 +340,6 @@ void launch_add_kernel(std::byte *c, const std::byte *a, const std::byte *b, lla
         break;
     }
     case LLAISYS_DTYPE_BF16: {
-        // 【优化后】float4 宽搬运：每线程处理 8 个 bf16 (16B)
-        size_t numel_vec = (numel + 7) / 8;
-        int blocks = static_cast<int>((numel_vec + threads - 1) / threads);
         add_kernel_bf16_vec<<<blocks, threads>>>(
             reinterpret_cast<llaisys::bf16_t *>(c),
             reinterpret_cast<const llaisys::bf16_t *>(a),

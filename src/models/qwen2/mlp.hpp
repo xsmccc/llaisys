@@ -1,13 +1,23 @@
 #pragma once
 #include "components.hpp"
+#include "qwen2_impl.hpp"
 #include "../../ops/swiglu/op.hpp"
 
 namespace llaisys {
 
-// 前向传播网络层
 class Qwen2MLP {
 public:
     Qwen2MLP() = default;
+
+    // 初始化预分配的工作空间
+    void init_workspace(const Qwen2Config& config) {
+        size_t di = config.intermediate_size;
+        size_t hs = config.hidden_size;
+        ws_gate_ = Tensor::create({1, di}, LLAISYS_DTYPE_F32, config.device_type, config.device_id);
+        ws_up_ = Tensor::create({1, di}, LLAISYS_DTYPE_F32, config.device_type, config.device_id);
+        ws_swiglu_ = Tensor::create({1, di}, LLAISYS_DTYPE_F32, config.device_type, config.device_id);
+        ws_down_ = Tensor::create({1, hs}, LLAISYS_DTYPE_F32, config.device_type, config.device_id);
+    }
 
     void set_params(void* gate_handle, void* up_handle, void* down_handle) {
         gate_proj_.set_params(gate_handle);
@@ -16,32 +26,25 @@ public:
     }
 
     tensor_t forward(tensor_t input) {
-        // Gate投影 多少信息应该通过
+        // 使用预分配张量
+        if (ws_gate_) {
+            gate_proj_.forward(ws_gate_, input);
+            up_proj_.forward(ws_up_, input);
+            ops::swiglu(ws_swiglu_, ws_gate_, ws_up_);
+            down_proj_.forward(ws_down_, ws_swiglu_);
+            return ws_down_;
+        }
+        // Fallback: 原始路径
         auto gate_out = gate_proj_.forward(input);
-
-        //Up投影  什么信息应该通过
         auto up_out = up_proj_.forward(input);
-        
-        // SwiGLU 激活（Gate × Up）
-        auto swiglu_out = Tensor::create(
-            gate_out->shape(),
-            gate_out->dtype(),
-            gate_out->deviceType(),
-            gate_out->deviceId()
-        );
-
+        auto swiglu_out = Tensor::create(gate_out->shape(), gate_out->dtype(), gate_out->deviceType(), gate_out->deviceId());
         ops::swiglu(swiglu_out, gate_out, up_out);
-
-        // Down 投影（投影回隐层维度）
-        auto output = down_proj_.forward(swiglu_out);
-
-        return output;
+        return down_proj_.forward(swiglu_out);
     }
 
 private:
-    Linear gate_proj_;   // 第1个投影：门控投影
-    Linear up_proj_;     // 第2个投影：上投影
-    Linear down_proj_;   // 第3个投影：下投影
+    Linear gate_proj_, up_proj_, down_proj_;
+    tensor_t ws_gate_, ws_up_, ws_swiglu_, ws_down_;
 };
 
 } // namespace llaisys

@@ -5,89 +5,72 @@
 
 namespace llaisys {
 
-// decoder解码器层
-/*
-x → Norm → Attention → Add(残差) → Norm → MLP → Add(残差) → output
-Pre-Norm 优势：
-  - 更稳定，梯度流动更好
-  - 无需 warmup
-  - 特别是在深网络中表现更好
-*/
 class Qwen2DecoderLayer {
 public:
     Qwen2DecoderLayer(const Qwen2Config& config)
-        : attn_(config),
+        : config_(config),
+          attn_(config),
           input_norm_(config.rms_norm_eps),
-          post_attn_norm_(config.rms_norm_eps) {}
+          post_attn_norm_(config.rms_norm_eps) {
+        // 初始化 MLP 工作空间
+        mlp_.init_workspace(config);
+        // 预分配 DecoderLayer 的工作空间张量
+        init_workspace();
+    }
 
     void set_params(const LlaisysQwen2Weights* w, size_t layer_idx) {
-        // Set attention parameters
         attn_.set_params(
-            w->attn_q_w[layer_idx],   // Q投影权重 [hidden_size, hidden_size]
-            w->attn_k_w[layer_idx],   // K投影权重 [hidden_size, hidden_size]
-            w->attn_v_w[layer_idx],   // V投影权重 [hidden_size, hidden_size]
-            w->attn_o_w[layer_idx],   // Output投影权重 [hidden_size, hidden_size]
-            w->attn_q_b[layer_idx],   // Q偏置 [hidden_size]
-            w->attn_k_b[layer_idx],   // K偏置 [hidden_size]
-            w->attn_v_b[layer_idx]    // V偏置 [hidden_size]
+            w->attn_q_w[layer_idx], w->attn_k_w[layer_idx],
+            w->attn_v_w[layer_idx], w->attn_o_w[layer_idx],
+            w->attn_q_b[layer_idx], w->attn_k_b[layer_idx],
+            w->attn_v_b[layer_idx]
         );
-
-        // Set MLP parameters
         mlp_.set_params(
-            w->mlp_gate_w[layer_idx],  // Gate投影权重 [intermediate_size, hidden_size]
-            w->mlp_up_w[layer_idx],    // Up投影权重 [intermediate_size, hidden_size]
-            w->mlp_down_w[layer_idx]   // Down投影权重 [hidden_size, intermediate_size]
+            w->mlp_gate_w[layer_idx], w->mlp_up_w[layer_idx],
+            w->mlp_down_w[layer_idx]
         );
-
-        // 设置层归一化权重
         input_norm_.set_weight(w->attn_norm_w[layer_idx]);
         post_attn_norm_.set_weight(w->mlp_norm_w[layer_idx]);
     }
 
-    tensor_t forward(tensor_t x, size_t pos) {
-        // 保存输入用于残差连接
+    // 优化版：使用预分配张量 + 外部 pos_tensor
+    tensor_t forward(tensor_t x, size_t pos, tensor_t pos_tensor) {
         auto residual = x;
-        // Layer Norm（归一化）
-        auto norm_x = input_norm_.forward(x);
-        // 多头自注意力
-        auto attn_out = attn_.forward(norm_x, pos);
-        
-        // 残差连接：Add
-        // 残差连接的目的：
-        //   1. 梯度直通（backprop 更有效）
-        //   2. 信息保留（attention不能摧毁原始信息）
-        //   3. 网络更深时尤其重要
-        auto add_out = Tensor::create(
-            attn_out->shape(),
-            attn_out->dtype(),
-            attn_out->deviceType(),
-            attn_out->deviceId()
-        );
-        ops::add(add_out, attn_out, residual);
 
-        // 保存注意力块的输出用于残差
-        residual = add_out;
-        // MLP前Layer norm（RMSNorm）
-        norm_x = post_attn_norm_.forward(add_out);
-        // 前向传播网络（MLP）
-        auto mlp_out = mlp_.forward(norm_x);
-        // MLP 后的残差连接
-        auto final_out = Tensor::create(
-            mlp_out->shape(),
-            mlp_out->dtype(),
-            mlp_out->deviceType(),
-            mlp_out->deviceId()
-        );
-        ops::add(final_out, mlp_out, residual);
+        input_norm_.forward(ws_norm1_, x);
+        auto attn_out = attn_.forward(ws_norm1_, pos, pos_tensor);
+        ops::add(ws_add1_, attn_out, residual);
+        residual = ws_add1_;
+        post_attn_norm_.forward(ws_norm2_, ws_add1_);
+        auto mlp_out = mlp_.forward(ws_norm2_);
+        ops::add(ws_add2_, mlp_out, residual);
+        return ws_add2_;
+    }
 
-        return final_out;
+    // 兼容旧接口
+    tensor_t forward(tensor_t x, size_t pos) {
+        std::vector<size_t> ps = {1};
+        std::vector<int64_t> ph = {static_cast<int64_t>(pos)};
+        auto pt = Tensor::create(ps, LLAISYS_DTYPE_I64, config_.device_type, config_.device_id);
+        pt->load(ph.data());
+        return forward(x, pos, pt);
     }
 
 private:
-    Qwen2Attention attn_;   //多头自注意力
-    Qwen2MLP mlp_;          //前向传播网络
-    RMSNorm input_norm_;    //注意力前的层归一化
-    RMSNorm post_attn_norm_;//MLP前的层归一化
+    Qwen2Config config_;
+    Qwen2Attention attn_;
+    Qwen2MLP mlp_;
+    RMSNorm input_norm_, post_attn_norm_;
+    // 预分配的工作空间
+    tensor_t ws_norm1_, ws_norm2_, ws_add1_, ws_add2_;
+
+    void init_workspace() {
+        size_t hs = config_.hidden_size;
+        ws_norm1_ = Tensor::create({1, hs}, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        ws_norm2_ = Tensor::create({1, hs}, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        ws_add1_ = Tensor::create({1, hs}, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+        ws_add2_ = Tensor::create({1, hs}, LLAISYS_DTYPE_F32, config_.device_type, config_.device_id);
+    }
 };
 
 } // namespace llaisys

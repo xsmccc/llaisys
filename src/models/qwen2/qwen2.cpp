@@ -5,6 +5,7 @@
 #include "../../ops/add/op.hpp"
 #include "../../ops/argmax/op.hpp"
 #include "../../device/runtime_api.hpp"
+#include "../../core/llaisys_core.hpp"
 #include <vector>
 #include <memory>
 #include <iostream>
@@ -28,6 +29,9 @@ public:
             layers_.emplace_back(config_);
         }
 
+        // 预分配推理所需的工作空间张量
+        init_inference_workspace();
+
         std::cerr << "[Qwen2] Model created with " << config_.num_hidden_layers 
                   << " layers, hidden_size=" << config_.hidden_size << std::endl;
     }
@@ -41,8 +45,11 @@ public:
     }
 
     int64_t infer(int64_t* token_ids, size_t ntoken) {
-        // Distribute weights on first call
-        distribute_weights();
+        // Distribute weights on first call only
+        if (!weights_distributed_) {
+            distribute_weights();
+            weights_distributed_ = true;
+        }
 
         if (!weights_.in_embed) {
             std::cerr << "[ERROR] Weights not loaded!" << std::endl;
@@ -56,42 +63,42 @@ public:
                 std::cerr << "\r[Qwen2] Token " << i << "/" << ntoken << std::flush;
             }
 
-            // 1. Embedding
-            // 在目标设备上创建 token 张量，用 load() 从主机拷贝数据
-            std::vector<size_t> token_shape = {1};
-            auto token_tensor = Tensor::create(token_shape, LLAISYS_DTYPE_I64, config_.device_type, config_.device_id);
+            // 1. 加载 token 到预分配张量
             int64_t token_val = token_ids[i];
-            token_tensor->load(&token_val);
+            ws_token_->load(&token_val);
 
-            auto hidden_state = embed_.forward(token_tensor);
+            // 2. Embedding
+            embed_.forward(ws_hidden_, ws_token_);
 
-            // 2. Forward through all layers
+            // 3. 加载 pos_tensor（每 token 只加载一次，所有层共享）
+            int64_t pos_val = static_cast<int64_t>(current_pos_);
+            ws_pos_->load(&pos_val);
+
+            // 4. Forward through all layers（使用预分配工作空间 + 共享 pos_tensor）
+            tensor_t current = ws_hidden_;
             for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx) {
-                hidden_state = layers_[layer_idx].forward(hidden_state, current_pos_);
+                current = layers_[layer_idx].forward(current, current_pos_, ws_pos_);
             }
 
-            // 3. Final norm
-            hidden_state = final_norm_.forward(hidden_state);
+            // 5. Final norm
+            final_norm_.forward(ws_final_norm_, current);
 
             current_pos_++;
 
-            // 4. LM Head prediction (only for last token)
+            // 6. LM Head prediction (only for last token)
             if (i == ntoken - 1) {
-                auto logits = lm_head_.forward(hidden_state);
+                lm_head_.forward(ws_logits_, ws_final_norm_);
 
-                // Argmax 取下一个 token
-                // 在相同设备上创建输出张量
-                auto out_idx = Tensor::create({1}, LLAISYS_DTYPE_I64, config_.device_type, config_.device_id);
-                auto out_val = Tensor::create({1}, logits->dtype(), config_.device_type, config_.device_id);
+                // Argmax
+                ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
 
-                ops::argmax(out_idx, out_val, logits);
-
-                // 将结果从设备拷回主机
+                // 将结果从设备拷回主机（这里需要同步）
                 if (config_.device_type != LLAISYS_DEVICE_CPU) {
                     const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(config_.device_type);
-                    api->memcpy_sync(&output_token, out_idx->data(), sizeof(int64_t), LLAISYS_MEMCPY_D2H);
+                    core::context().runtime().synchronize();
+                    api->memcpy_sync(&output_token, ws_out_idx_->data(), sizeof(int64_t), LLAISYS_MEMCPY_D2H);
                 } else {
-                    output_token = *reinterpret_cast<int64_t*>(out_idx->data());
+                    output_token = *reinterpret_cast<int64_t*>(ws_out_idx_->data());
                 }
             }
         }
@@ -114,6 +121,31 @@ private:
     Linear lm_head_;
 
     size_t current_pos_ = 0;
+    bool weights_distributed_ = false;
+
+    // 预分配的推理工作空间张量（decode 阶段 seq_len=1）
+    tensor_t ws_token_;       // [1] I64
+    tensor_t ws_pos_;         // [1] I64
+    tensor_t ws_hidden_;      // [1, hidden_size] F32
+    tensor_t ws_final_norm_;  // [1, hidden_size] F32
+    tensor_t ws_logits_;      // [1, vocab_size] F32
+    tensor_t ws_out_idx_;     // [1] I64
+    tensor_t ws_out_val_;     // [1] F32
+
+    void init_inference_workspace() {
+        size_t hs = config_.hidden_size;
+        size_t vs = config_.vocab_size;
+        auto dt = config_.device_type;
+        auto di = config_.device_id;
+
+        ws_token_ = Tensor::create({1}, LLAISYS_DTYPE_I64, dt, di);
+        ws_pos_ = Tensor::create({1}, LLAISYS_DTYPE_I64, dt, di);
+        ws_hidden_ = Tensor::create({1, hs}, LLAISYS_DTYPE_F32, dt, di);
+        ws_final_norm_ = Tensor::create({1, hs}, LLAISYS_DTYPE_F32, dt, di);
+        ws_logits_ = Tensor::create({1, vs}, LLAISYS_DTYPE_F32, dt, di);
+        ws_out_idx_ = Tensor::create({1}, LLAISYS_DTYPE_I64, dt, di);
+        ws_out_val_ = Tensor::create({1}, LLAISYS_DTYPE_F32, dt, di);
+    }
 
     void init_weight_arrays(size_t nlayers) {
         weights_.attn_q_w = new llaisysTensor_t[nlayers];

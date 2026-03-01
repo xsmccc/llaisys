@@ -12,10 +12,15 @@ target("llaisys-device-nvidia") -- 定义 NVIDIA 设备静态库目标
     
     -- Enable CUDA language
     add_languages("cuda") -- 启用 CUDA 语言支持
+    -- 禁用 RDC（relocatable device code）减少额外显存占用
+    set_values("cuda.rdc", false)
+    set_policy("build.cuda.devlink", false)
     
-    -- Set CUDA architecture - adjust to your GPU capability
-    -- For common cases: sm_60 (P100), sm_70 (V100, T4), sm_80 (A100, RTX30), sm_89 (RTX40)
-    add_cuflags("-arch=sm_89", {tools = "nvcc"}) -- 设置 CUDA 架构
+    -- Set CUDA architecture - 使用可配置的 GPU 架构
+    -- 通过 xmake f --cuda-arch=sm_XX 设置，常见值：
+    --   sm_70 (V100, T4), sm_80 (A100, RTX30), sm_89 (RTX40), sm_90 (H100)
+    local arch = get_config("cuda-arch") or "sm_89"
+    add_cuflags("-arch=" .. arch, {tools = "nvcc"}) -- 设置 CUDA 架构
     add_cuflags("-Xcompiler -fPIC", {tools = "nvcc"}) -- 透传 C++ 编译器参数
     
     -- Add PIC flag for Linux （position independent code）位置独立代码
@@ -42,9 +47,13 @@ target("llaisys-ops-nvidia") -- 定义 NVIDIA 算子静态库目标
     
     -- Enable CUDA language
     add_languages("cuda") -- 启用 CUDA 语言支持
+    -- 禁用 RDC（relocatable device code）减少额外显存占用
+    set_values("cuda.rdc", false)
+    set_policy("build.cuda.devlink", false)
     
-    -- Set CUDA architecture
-    add_cuflags("-arch=sm_70", {tools = "nvcc"}) -- 设置 CUDA 架构
+    -- Set CUDA architecture - 使用可配置的 GPU 架构
+    local arch = get_config("cuda-arch") or "sm_89"
+    add_cuflags("-arch=" .. arch, {tools = "nvcc"}) -- 设置 CUDA 架构
     add_cuflags("-Xcompiler -fPIC", {tools = "nvcc"}) -- 透传 C++ 编译器参数
     
     -- Add PIC flag for Linux

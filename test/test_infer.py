@@ -158,6 +158,9 @@ if __name__ == "__main__":
 
     del model
     gc.collect()
+    # 释放 PyTorch CUDA 缓存，为 LLAISYS 腾出 GPU 显存
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     print("\n=== Answer ===\n")
     print("Tokens:")
