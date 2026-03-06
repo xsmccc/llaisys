@@ -24,6 +24,16 @@ public:
         o_proj_.set_params(o_w);
     }
 
+    // 量化版本: 权重为 INT8 + per-channel scales
+    void set_params_quantized(void* q_w, void* k_w, void* v_w, void* o_w,
+                              void* q_b, void* k_b, void* v_b,
+                              void* q_s, void* k_s, void* v_s, void* o_s) {
+        q_proj_.set_params_quantized(q_w, q_s, q_b);
+        k_proj_.set_params_quantized(k_w, k_s, k_b);
+        v_proj_.set_params_quantized(v_w, v_s, v_b);
+        o_proj_.set_params_quantized(o_w, o_s);
+    }
+
     // 优化版 forward：接受外部传入的 pos_tensor（每 token 只创建一次）
     tensor_t forward(tensor_t x, size_t pos, tensor_t pos_tensor) {
         // Q, K, V 投影 — 使用预分配输出张量

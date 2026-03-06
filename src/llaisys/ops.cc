@@ -7,6 +7,7 @@
 #include "../ops/argmax/op.hpp"
 #include "../ops/embedding/op.hpp"
 #include "../ops/linear/op.hpp"
+#include "../ops/linear_quantized/op.hpp"
 #include "../ops/rearrange/op.hpp"
 #include "../ops/rms_norm/op.hpp"
 #include "../ops/rope/op.hpp"
@@ -27,6 +28,10 @@ __C {
     }
     void llaisysLinear(llaisysTensor_t out, llaisysTensor_t in, llaisysTensor_t weight, llaisysTensor_t bias) {
         llaisys::ops::linear(out->tensor, in->tensor, weight->tensor, bias->tensor);
+    }
+    void llaisysLinearQuantized(llaisysTensor_t out, llaisysTensor_t in, llaisysTensor_t weight, llaisysTensor_t scales, llaisysTensor_t bias) {
+        llaisys::ops::linear_quantized(out->tensor, in->tensor, weight->tensor,
+                                       scales->tensor, bias ? bias->tensor : nullptr);
     }
     void llaisysRearrange(llaisysTensor_t out, llaisysTensor_t in) {
         llaisys::ops::rearrange(out->tensor, in->tensor);

@@ -24,6 +24,8 @@ typedef enum {
     LLAISYS_DEVICE_CPU = 0,//CPU
     //// TODO: Add more device types here. Numbers need to be consecutive.
     LLAISYS_DEVICE_NVIDIA = 1,//NVIDIA
+    LLAISYS_DEVICE_METAX = 2,//MetaX (沐曦 MACA)
+    LLAISYS_DEVICE_TIANSHU = 3,//Tianshu (天数智芯 TOPSRIDER)
     LLAISYS_DEVICE_TYPE_COUNT
 } llaisysDeviceType_t;
 

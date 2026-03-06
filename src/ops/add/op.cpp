@@ -8,6 +8,12 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/add_nvidia.hpp"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/add_metax.hpp"
+#endif
+#ifdef ENABLE_TIANSHU_API
+#include "tianshu/add_tianshu.hpp"
+#endif
 
 // 调度层Dispatcher
 namespace llaisys::ops {
@@ -33,6 +39,14 @@ void add(tensor_t c, tensor_t a, tensor_t b) {
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
     return nvidia::add(c->data(), a->data(), b->data(), c->dtype(), c->numel());
+#endif
+#ifdef ENABLE_METAX_API
+    case LLAISYS_DEVICE_METAX:
+    return metax::add(c->data(), a->data(), b->data(), c->dtype(), c->numel());
+#endif
+#ifdef ENABLE_TIANSHU_API
+    case LLAISYS_DEVICE_TIANSHU:
+    return tianshu::add(c->data(), a->data(), b->data(), c->dtype(), c->numel());
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;

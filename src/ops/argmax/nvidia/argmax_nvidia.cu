@@ -71,6 +71,8 @@ __device__ __forceinline__ float from_float_to_f32(float v) { return v; }
 __device__ __forceinline__ void warp_reduce_max(float& val, size_t& idx) {
     // 5 轮 shuffle：32 → 16 → 8 → 4 → 2 → 1
     for (int delta = 16; delta >= 1; delta >>= 1) {
+        // other_val/other_idx 是距离 delta 的线程的值和索引
+        // val/idx 是当前线程的值和索引
         float other_val = __shfl_down_sync(0xffffffff, val, delta);
         size_t other_idx = __shfl_down_sync(0xffffffff, idx, delta);
         if (other_val > val) {

@@ -19,7 +19,7 @@ tensor_t Tensor::create(const std::vector<size_t> &shape,
                         llaisysDeviceType_t device_type,
                         int device) {
     size_t ndim_ = shape.size();
-    std::vector<ptrdiff_t> strides(ndim_);
+    std::vector<ptrdiff_t> strides(ndim_);//ptrdiff_t有符号整数，可以表示指针之间的距离，单位是元素个数
     size_t stride = 1;
     for (size_t i = 1; i <= ndim_; i++) {
         strides[ndim_ - i] = stride;

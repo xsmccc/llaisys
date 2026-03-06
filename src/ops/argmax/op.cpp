@@ -7,6 +7,12 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/argmax_nvidia.hpp"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/argmax_metax.hpp"
+#endif
+#ifdef ENABLE_TIANSHU_API
+#include "tianshu/argmax_tianshu.hpp"
+#endif
 
 //传入max_idx max_val是对象，然后将结果传入参数接口
 // max_idx：输出索引 
@@ -40,8 +46,24 @@ void argmax(tensor_t max_idx, tensor_t max_val, tensor_t vals) {
             vals->data(), vals->dtype(), vals->numel()
         );
 #endif
+#ifdef ENABLE_METAX_API
+    case LLAISYS_DEVICE_METAX:
+        return metax::argmax(
+            max_idx->data(), max_idx->dtype(),
+            max_val->data(),
+            vals->data(), vals->dtype(), vals->numel()
+        );
+#endif
+#ifdef ENABLE_TIANSHU_API
+    case LLAISYS_DEVICE_TIANSHU:
+        return tianshu::argmax(
+            max_idx->data(), max_idx->dtype(),
+            max_val->data(),
+            vals->data(), vals->dtype(), vals->numel()
+        );
+#endif
     default:
-        EXCEPTION_UNSUPPORTED_DEVICE;
+        ASSERT(false, "Unsupported device type for argmax");
     }
 }
 } // namespace llaisys::ops

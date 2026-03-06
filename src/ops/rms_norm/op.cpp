@@ -7,6 +7,12 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/rms_norm_nvidia.hpp"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/rms_norm_metax.hpp"
+#endif
+#ifdef ENABLE_TIANSHU_API
+#include "tianshu/rms_norm_tianshu.hpp"
+#endif
 
 namespace llaisys::ops {
 void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps) {
@@ -43,12 +49,26 @@ void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps) {
                 cols, rows, eps
             );
     #endif
+    #ifdef ENABLE_METAX_API
+        case LLAISYS_DEVICE_METAX:
+            return metax::rms_norm(
+                out->data(), out->dtype(),
+                in->data(),
+                weight->data(),
+                cols, rows, eps
+            );
+    #endif
+    #ifdef ENABLE_TIANSHU_API
+        case LLAISYS_DEVICE_TIANSHU:
+            return tianshu::rms_norm(
+                out->data(), out->dtype(),
+                in->data(),
+                weight->data(),
+                cols, rows, eps
+            );
+    #endif
         default:
-            EXCEPTION_UNSUPPORTED_DEVICE;
+            ASSERT(false, "Unsupported device type for rms_norm");
     }
 }
 } // namespace llaisys::ops
-
-/*
-
-*/

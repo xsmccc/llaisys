@@ -29,8 +29,9 @@ except ImportError:
 
 
 class Qwen2:
-    def __init__(self, model_path, device: DeviceType = DeviceType.CPU, max_seq_len: int = 512):
-        """Initialize Qwen2 model and load weights from safetensors
+    def __init__(self, model_path, device: DeviceType = DeviceType.CPU,
+                 max_seq_len: int = 512, quantized: bool = False):
+        """Initialize Qwen2 model and load weights from safetensors or quantized npz
         
         Args:
             model_path: 模型文件夹路径
@@ -38,9 +39,11 @@ class Qwen2:
             max_seq_len: KV cache 最大序列长度（默认 512）。
                          直接影响 GPU 显存占用：每层 KV cache = 2 × max_seq_len × nkvh × dh × 4B。
                          8GB GPU 建议 512，A100 (80GB) 可设为 4096 甚至 131072。
+            quantized: 是否加载 INT8 量化权重 (quantized_weights.npz)
         """
         self.model_path = Path(model_path) # 模型文件夹路径
         self.device = device #计算设备
+        self.quantized = quantized
         self._kept_references = [] # 保持python对象引用，防止被回收
 
         # 读取config.json文件
@@ -84,6 +87,8 @@ class Qwen2:
         # 创建C++后端模型
         print(f"[Qwen2] Initializing C++ Backend...")
         print(f"        Layers: {self.meta.nlayer}, Hidden: {self.meta.hs}, Heads: {self.meta.nh}")
+        if self.quantized:
+            print(f"        Mode: INT8 Quantized (W8A32)")
 
         # 调用C函数创建模型
         self.handle = LIB_LLAISYS.llaisysQwen2ModelCreate(
@@ -102,7 +107,10 @@ class Qwen2:
 
         # 加载权重
         print(f"[Qwen2] Loading weights from {model_path}...")
-        self._load_safetensors(self.model_path)
+        if self.quantized:
+            self._load_quantized(self.model_path)
+        else:
+            self._load_safetensors(self.model_path)
 
     # 析构函数 
     def __del__(self):
@@ -224,6 +232,164 @@ class Qwen2:
             elif suffix == "mlp.down_proj.weight":
                 w.mlp_down_w[layer_idx] = ptr   # Down投影
 
+    def _create_tensor_from_numpy(self, array: np.ndarray):
+        """从 numpy 数组创建 LLAISYS Tensor 并返回 C handle"""
+        if Tensor is None:
+            return None
+
+        if not array.flags['C_CONTIGUOUS']:
+            array = np.ascontiguousarray(array)
+
+        # 根据 dtype 选择 LLAISYS DataType
+        if array.dtype == np.int8:
+            dtype = DataType.I8
+        elif array.dtype == np.float32:
+            dtype = DataType.F32
+        else:
+            raise ValueError(f"Unsupported numpy dtype: {array.dtype}")
+
+        llaisys_tensor = Tensor(
+            shape=array.shape,
+            dtype=dtype,
+            device=self.device
+        )
+        data_ptr = array.ctypes.data_as(ctypes.c_void_p)
+        llaisys_tensor.load(data_ptr)
+        self._kept_references.append(llaisys_tensor)
+        return llaisys_tensor.lib_tensor()
+
+    def _load_quantized(self, path: Path):
+        """加载 INT8 量化权重 (quantized_weights.npz)"""
+        npz_path = path / "quantized_weights.npz"
+        if not npz_path.exists():
+            raise FileNotFoundError(f"Quantized weights not found at {npz_path}")
+
+        # 读取量化配置
+        config_path = path / "quantize_config.json"
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                quant_config = json.load(f)
+            quantized_names = set(quant_config.get("quantized_weights", []))
+            print(f"  Quantized weights: {len(quantized_names)}")
+        else:
+            quantized_names = set()
+            print("  Warning: quantize_config.json not found, detecting from dtypes")
+
+        # 加载 npz
+        print(f"  Loading {npz_path.name}...")
+        data = np.load(str(npz_path))
+
+        # 设置量化标志
+        w = self.c_weights
+        w.quantized = 1
+
+        for key in data.files:
+            arr = data[key]
+
+            # scales 条目: "{original_name}.scales"
+            if key.endswith(".scales"):
+                original_name = key[:-len(".scales")]
+                ptr = self._create_tensor_from_numpy(arr.astype(np.float32))
+                if ptr is None:
+                    continue
+                self._map_scale(original_name, ptr)
+                continue
+
+            # 权重条目
+            name = key
+            is_quantized_weight = (name in quantized_names) or (arr.dtype == np.int8)
+
+            if is_quantized_weight:
+                # INT8 量化权重
+                ptr = self._create_tensor_from_numpy(arr.astype(np.int8))
+            else:
+                # F32 权重 (embedding, norm, bias 等)
+                ptr = self._create_tensor_from_numpy(arr.astype(np.float32))
+
+            if ptr is None:
+                continue
+
+            # 复用现有的 _map_weight_ptr 逻辑
+            self._map_weight_ptr(name, ptr)
+
+        print(f"  Quantized weights loaded successfully (INT8 mode)")
+
+    def _map_weight_ptr(self, name: str, ptr):
+        """映射权重 handle 到 C 结构体 (不做类型转换, 直接用 ptr)"""
+        w = self.c_weights
+
+        if name == "model.embed_tokens.weight":
+            w.in_embed = ptr
+        elif name == "model.norm.weight":
+            w.out_norm_w = ptr
+        elif name == "lm_head.weight":
+            w.out_embed = ptr
+        elif name.startswith("model.layers."):
+            parts = name.split('.')
+            try:
+                layer_idx = int(parts[2])
+                suffix = ".".join(parts[3:])
+            except Exception:
+                return
+            if layer_idx >= self.meta.nlayer:
+                return
+
+            if suffix == "self_attn.q_proj.weight":
+                w.attn_q_w[layer_idx] = ptr
+            elif suffix == "self_attn.k_proj.weight":
+                w.attn_k_w[layer_idx] = ptr
+            elif suffix == "self_attn.v_proj.weight":
+                w.attn_v_w[layer_idx] = ptr
+            elif suffix == "self_attn.o_proj.weight":
+                w.attn_o_w[layer_idx] = ptr
+            elif suffix == "self_attn.q_proj.bias":
+                w.attn_q_b[layer_idx] = ptr
+            elif suffix == "self_attn.k_proj.bias":
+                w.attn_k_b[layer_idx] = ptr
+            elif suffix == "self_attn.v_proj.bias":
+                w.attn_v_b[layer_idx] = ptr
+            elif suffix == "input_layernorm.weight":
+                w.attn_norm_w[layer_idx] = ptr
+            elif suffix == "post_attention_layernorm.weight":
+                w.mlp_norm_w[layer_idx] = ptr
+            elif suffix == "mlp.gate_proj.weight":
+                w.mlp_gate_w[layer_idx] = ptr
+            elif suffix == "mlp.up_proj.weight":
+                w.mlp_up_w[layer_idx] = ptr
+            elif suffix == "mlp.down_proj.weight":
+                w.mlp_down_w[layer_idx] = ptr
+
+    def _map_scale(self, weight_name: str, ptr):
+        """映射 scales handle 到 C 结构体"""
+        w = self.c_weights
+
+        if weight_name == "lm_head.weight":
+            w.out_embed_scales = ptr
+        elif weight_name.startswith("model.layers."):
+            parts = weight_name.split('.')
+            try:
+                layer_idx = int(parts[2])
+                suffix = ".".join(parts[3:])
+            except Exception:
+                return
+            if layer_idx >= self.meta.nlayer:
+                return
+
+            if suffix == "self_attn.q_proj.weight":
+                w.attn_q_w_scales[layer_idx] = ptr
+            elif suffix == "self_attn.k_proj.weight":
+                w.attn_k_w_scales[layer_idx] = ptr
+            elif suffix == "self_attn.v_proj.weight":
+                w.attn_v_w_scales[layer_idx] = ptr
+            elif suffix == "self_attn.o_proj.weight":
+                w.attn_o_w_scales[layer_idx] = ptr
+            elif suffix == "mlp.gate_proj.weight":
+                w.mlp_gate_w_scales[layer_idx] = ptr
+            elif suffix == "mlp.up_proj.weight":
+                w.mlp_up_w_scales[layer_idx] = ptr
+            elif suffix == "mlp.down_proj.weight":
+                w.mlp_down_w_scales[layer_idx] = ptr
+
     def generate(
         self,
         inputs: Sequence[int],  # 输入token IDs，例如 [151644, 8948, 198, ...]
@@ -231,68 +397,138 @@ class Qwen2:
         top_k: int = 1, # top-k采样 (1=贪心)
         top_p: float = 0.8,  # top-p采样
         temperature: float = 0.8,   # 温度参数
+        seed: int = 0,  # 随机种子 (0=随机)
     ) -> list:
         """
         生成tokens
         
         LLM的推理分为两个阶段：
         
-        1. Prefill (预填充): 一次性处理所有输入tokens
+        1. Prefill (预填充): 逐个处理所有输入tokens
            - 目的：计算输入的所有KV缓存
-           - 速度快（并行处理）
         
         2. Decoding (解码): 逐个生成新tokens
            - 目的：根据KV缓存，每次生成一个token
-           - 速度慢（逐个处理）
+
+        支持 Temperature / Top-K / Top-P 随机采样。
+        当 top_k=1 时退化为 argmax 贪心解码。
         """
-        """Generate tokens using the model"""
         current_ids = list(inputs)
 
         # 创建C数组类型（用于ctypes与C交互）
         InArrayType = ctypes.c_int64 * 1
 
+        # 判断是否使用贪心解码（向后兼容旧API）
+        use_sampling = not (top_k == 1)
+
         # Prefill - 处理输入tokens（除最后一个）
         for i in range(len(current_ids) - 1):
             token = current_ids[i]
-            in_ptr = InArrayType(token) # 包装成C数组
+            in_ptr = InArrayType(token)
             
-            # 调用C++推理函数
+            # Prefill阶段只更新KV cache，不需要采样
             LIB_LLAISYS.llaisysQwen2ModelInfer(
-                self.handle,    # 模型句柄
-                in_ptr, # 输入token
-                ctypes.c_size_t(1)  # token数量=1
-            )
-                #更新KV缓存
-
-        # 处理最后一个输入token并获取第一个预测
-        last_input = current_ids[-1]
-        in_ptr = InArrayType(last_input)
-
-        # 调用C函数，这次有返回值
-        next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
-            self.handle,
-            in_ptr,
-            ctypes.c_size_t(1)
-        )
-        # 将预测的token追加到列表
-        current_ids.append(next_token)
-
-        # Decoding - 逐个生成剩余的tokens
-        for _ in range(max_new_tokens - 1):
-            # 用前一个token作为输入
-            in_ptr = InArrayType(next_token)
-
-            
-            next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
                 self.handle,
                 in_ptr,
                 ctypes.c_size_t(1)
             )
 
+        # 处理最后一个输入token并获取第一个预测
+        last_input = current_ids[-1]
+        in_ptr = InArrayType(last_input)
+
+        if use_sampling:
+            next_token = LIB_LLAISYS.llaisysQwen2ModelInferEx(
+                self.handle, in_ptr, ctypes.c_size_t(1),
+                ctypes.c_float(temperature),
+                ctypes.c_int(top_k),
+                ctypes.c_float(top_p),
+                ctypes.c_uint64(seed),
+            )
+        else:
+            next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
+                self.handle, in_ptr, ctypes.c_size_t(1)
+            )
+        current_ids.append(next_token)
+
+        # Decoding - 逐个生成剩余的tokens
+        for _ in range(max_new_tokens - 1):
+            in_ptr = InArrayType(next_token)
+
+            if use_sampling:
+                next_token = LIB_LLAISYS.llaisysQwen2ModelInferEx(
+                    self.handle, in_ptr, ctypes.c_size_t(1),
+                    ctypes.c_float(temperature),
+                    ctypes.c_int(top_k),
+                    ctypes.c_float(top_p),
+                    ctypes.c_uint64(seed),
+                )
+            else:
+                next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
+                    self.handle, in_ptr, ctypes.c_size_t(1)
+                )
+
             current_ids.append(next_token)
 
-            # 提前停止条件 如果预测的token是EOS 
             if next_token == self.meta.end_token:
                 break
-        # 返回完整的token序列
+
         return current_ids
+
+    def generate_stream(
+        self,
+        inputs: Sequence[int],
+        max_new_tokens: int = 128,
+        top_k: int = 50,
+        top_p: float = 0.8,
+        temperature: float = 0.8,
+        seed: int = 0,
+    ):
+        """
+        流式生成tokens（Python生成器）。
+        每生成一个 token 就 yield 出来，用于流式输出 / SSE。
+        """
+        InArrayType = ctypes.c_int64 * 1
+        use_sampling = not (top_k == 1)
+
+        # Prefill
+        for i in range(len(inputs) - 1):
+            in_ptr = InArrayType(inputs[i])
+            LIB_LLAISYS.llaisysQwen2ModelInfer(
+                self.handle, in_ptr, ctypes.c_size_t(1)
+            )
+
+        # First generated token
+        in_ptr = InArrayType(inputs[-1])
+        if use_sampling:
+            next_token = LIB_LLAISYS.llaisysQwen2ModelInferEx(
+                self.handle, in_ptr, ctypes.c_size_t(1),
+                ctypes.c_float(temperature), ctypes.c_int(top_k),
+                ctypes.c_float(top_p), ctypes.c_uint64(seed),
+            )
+        else:
+            next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
+                self.handle, in_ptr, ctypes.c_size_t(1)
+            )
+        yield next_token
+
+        # Decode loop
+        for _ in range(max_new_tokens - 1):
+            if next_token == self.meta.end_token:
+                return
+            in_ptr = InArrayType(next_token)
+            if use_sampling:
+                next_token = LIB_LLAISYS.llaisysQwen2ModelInferEx(
+                    self.handle, in_ptr, ctypes.c_size_t(1),
+                    ctypes.c_float(temperature), ctypes.c_int(top_k),
+                    ctypes.c_float(top_p), ctypes.c_uint64(seed),
+                )
+            else:
+                next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
+                    self.handle, in_ptr, ctypes.c_size_t(1)
+                )
+            yield next_token
+
+    def reset(self):
+        """重置模型状态（清空 KV cache），用于新一轮对话"""
+        LIB_LLAISYS.llaisysQwen2ModelReset(self.handle)

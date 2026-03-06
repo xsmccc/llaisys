@@ -91,7 +91,7 @@ desktop.ini
 
 models/
 
-# Local study notes / experiments (do not upload)
-docs/GPU_INFERENCE_OPTIMIZATION.md
+# Local study notes / docs (do not upload)
+docs/
 learning/
-scripts/
+*.md

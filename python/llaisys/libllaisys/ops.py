@@ -1,6 +1,6 @@
 from .tensor import llaisysTensor_t
 from ctypes import c_float
-
+# 定义Ops类，封装了对C底层代码的调用
 def load_ops(lib):
     lib.llaisysAdd.argtypes = [llaisysTensor_t, llaisysTensor_t, llaisysTensor_t]
     lib.llaisysAdd.restype = None

@@ -151,13 +151,13 @@ __global__ void self_attention_fused(
     const T* __restrict__ q,          // [seq_len, nhead, head_dim]
     const T* __restrict__ k,          // [total_len, kv_head, head_dim]
     const T* __restrict__ v,          // [total_len, kv_head, v_head_dim]
-    size_t seq_len,
-    size_t total_len,
-    size_t nhead,
-    size_t kv_head,
-    size_t head_dim,
-    size_t v_head_dim,
-    float scale
+    size_t seq_len, // query 序列长度
+    size_t total_len,   // KV 序列长度（包含 padding）
+    size_t nhead,   // 注意力头总数
+    size_t kv_head, // KV 头数（GQA 场景下 nhead % kv_head == 0）
+    size_t head_dim, // 每个头的维度
+    size_t v_head_dim, // 每个 V 头的维度
+    float scale // 缩放因子（通常是 1/sqrt(head_dim)）
 ) {
     // ── 索引映射 ──
     size_t i    = blockIdx.x;                     // query 位置

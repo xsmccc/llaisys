@@ -7,6 +7,12 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/embedding_nvidia.hpp"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/embedding_metax.hpp"
+#endif
+#ifdef ENABLE_TIANSHU_API
+#include "tianshu/embedding_tianshu.hpp"
+#endif
 //Embedding层实现
 /*
 weight——shape[Vocab_Size,Hidden_Dim]
@@ -46,8 +52,24 @@ void embedding(tensor_t out, tensor_t index, tensor_t weight) {
                 weight->data(), vocab_size, embedding_dim
             );
     #endif
+    #ifdef ENABLE_METAX_API
+        case LLAISYS_DEVICE_METAX:
+            return metax::embedding(
+                out->data(), out->dtype(),
+                index->data(), num_indices, index->dtype(),
+                weight->data(), vocab_size, embedding_dim
+            );
+    #endif
+    #ifdef ENABLE_TIANSHU_API
+        case LLAISYS_DEVICE_TIANSHU:
+            return tianshu::embedding(
+                out->data(), out->dtype(),
+                index->data(), num_indices, index->dtype(),
+                weight->data(), vocab_size, embedding_dim
+            );
+    #endif
         default:
-            EXCEPTION_UNSUPPORTED_DEVICE;
+            ASSERT(false, "Unsupported device type for embedding");
     }
 }
 } // namespace llaisys::ops

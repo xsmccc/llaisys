@@ -6,6 +6,12 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/rope_nvidia.hpp"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/rope_metax.hpp"
+#endif
+#ifdef ENABLE_TIANSHU_API
+#include "tianshu/rope_tianshu.hpp"
+#endif
 
 namespace llaisys::ops {
 void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
@@ -53,12 +59,28 @@ void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
                 theta
             );
     #endif
+    #ifdef ENABLE_METAX_API
+        case LLAISYS_DEVICE_METAX:
+            return metax::rope(
+                out->data(), out->dtype(),
+                in->data(),
+                pos_ids->data(),
+                seq_len, n_heads, head_dim,
+                theta
+            );
+    #endif
+    #ifdef ENABLE_TIANSHU_API
+        case LLAISYS_DEVICE_TIANSHU:
+            return tianshu::rope(
+                out->data(), out->dtype(),
+                in->data(),
+                pos_ids->data(),
+                seq_len, n_heads, head_dim,
+                theta
+            );
+    #endif
         default:
-            EXCEPTION_UNSUPPORTED_DEVICE;
+            ASSERT(false, "Unsupported device type for rope");
     }
 }
 } // namespace llaisys::ops
-/*
-需要的参数
-
-*/

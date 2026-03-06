@@ -122,7 +122,7 @@ def llaisys_infer(
 if __name__ == "__main__":
     # 解析命令行参数
     parser = argparse.ArgumentParser()
-    parser.add_argument("--device", default="cpu", choices=["cpu", "nvidia"], type=str)
+    parser.add_argument("--device", default="cpu", choices=["cpu", "nvidia", "metax", "tianshu"], type=str)
     parser.add_argument("--model", default=None, type=str)
     parser.add_argument("--prompt", default="Who are you?", type=str)
     parser.add_argument("--max_steps", default=128, type=int)

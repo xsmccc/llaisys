@@ -33,6 +33,26 @@ public:
         post_attn_norm_.set_weight(w->mlp_norm_w[layer_idx]);
     }
 
+    // 量化版本: 权重为 INT8 + per-channel scales
+    void set_params_quantized(const LlaisysQwen2Weights* w, size_t layer_idx) {
+        attn_.set_params_quantized(
+            w->attn_q_w[layer_idx], w->attn_k_w[layer_idx],
+            w->attn_v_w[layer_idx], w->attn_o_w[layer_idx],
+            w->attn_q_b[layer_idx], w->attn_k_b[layer_idx],
+            w->attn_v_b[layer_idx],
+            w->attn_q_w_scales[layer_idx], w->attn_k_w_scales[layer_idx],
+            w->attn_v_w_scales[layer_idx], w->attn_o_w_scales[layer_idx]
+        );
+        mlp_.set_params_quantized(
+            w->mlp_gate_w[layer_idx], w->mlp_up_w[layer_idx],
+            w->mlp_down_w[layer_idx],
+            w->mlp_gate_w_scales[layer_idx], w->mlp_up_w_scales[layer_idx],
+            w->mlp_down_w_scales[layer_idx]
+        );
+        input_norm_.set_weight(w->attn_norm_w[layer_idx]);
+        post_attn_norm_.set_weight(w->mlp_norm_w[layer_idx]);
+    }
+
     // 优化版：使用预分配张量 + 外部 pos_tensor
     tensor_t forward(tensor_t x, size_t pos, tensor_t pos_tensor) {
         auto residual = x;

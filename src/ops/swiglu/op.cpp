@@ -8,6 +8,12 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/swiglu_nvidia.hpp"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/swiglu_metax.hpp"
+#endif
+#ifdef ENABLE_TIANSHU_API
+#include "tianshu/swiglu_tianshu.hpp"
+#endif
 
 namespace llaisys::ops {
 void swiglu(tensor_t out, tensor_t gate, tensor_t up) {
@@ -43,8 +49,28 @@ void swiglu(tensor_t out, tensor_t gate, tensor_t up) {
                     numel
                 );
         #endif
+        #ifdef ENABLE_METAX_API
+            case LLAISYS_DEVICE_METAX:
+                return metax::swiglu(
+                    out->data(),
+                    out->dtype(),
+                    gate->data(),
+                    up->data(),
+                    numel
+                );
+        #endif
+        #ifdef ENABLE_TIANSHU_API
+            case LLAISYS_DEVICE_TIANSHU:
+                return tianshu::swiglu(
+                    out->data(),
+                    out->dtype(),
+                    gate->data(),
+                    up->data(),
+                    numel
+                );
+        #endif
             default:
-                EXCEPTION_UNSUPPORTED_DEVICE;
-    }
+                ASSERT(false, "Unsupported device type for swiglu");
+        }
     }
 } // namespace llaisys::ops

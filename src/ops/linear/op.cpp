@@ -8,6 +8,12 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/linear_nvidia.hpp"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/linear_metax.hpp"
+#endif
+#ifdef ENABLE_TIANSHU_API
+#include "tianshu/linear_tianshu.hpp"
+#endif
 
 //默认输入为2D张量
 namespace llaisys::ops {
@@ -72,8 +78,32 @@ void linear(tensor_t out, tensor_t in, tensor_t weight, tensor_t bias) {
                 rows
             );
     #endif
+    #ifdef ENABLE_METAX_API
+        case LLAISYS_DEVICE_METAX:
+            return metax::linear(
+                out->data(), out->dtype(),
+                in->data(),
+                weight->data(),
+                has_bias ? bias->data() : nullptr,
+                in_features,
+                out_features,
+                rows
+            );
+    #endif
+    #ifdef ENABLE_TIANSHU_API
+        case LLAISYS_DEVICE_TIANSHU:
+            return tianshu::linear(
+                out->data(), out->dtype(),
+                in->data(),
+                weight->data(),
+                has_bias ? bias->data() : nullptr,
+                in_features,
+                out_features,
+                rows
+            );
+    #endif
         default:
-            EXCEPTION_UNSUPPORTED_DEVICE;
+            ASSERT(false, "Unsupported device type for linear");
     }
 }
 } // namespace llaisys::ops

@@ -341,6 +341,7 @@ void launch_add_kernel(std::byte *c, const std::byte *a, const std::byte *b, lla
     }
     case LLAISYS_DTYPE_BF16: {
         add_kernel_bf16_vec<<<blocks, threads>>>(
+            
             reinterpret_cast<llaisys::bf16_t *>(c),
             reinterpret_cast<const llaisys::bf16_t *>(a),
             reinterpret_cast<const llaisys::bf16_t *>(b),

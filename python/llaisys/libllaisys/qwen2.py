@@ -53,6 +53,17 @@ class LlaisysQwen2Weights(ctypes.Structure):
         ("mlp_gate_w", POINTER(TensorHandle)),    # Gate投影权重 [28]
         ("mlp_up_w", POINTER(TensorHandle)),      # Up投影权重 [28]
         ("mlp_down_w", POINTER(TensorHandle)),    # Down投影权重 [28]
+
+        # ===== W8A32 量化 scales (INT8 per-channel 对称量化) =====
+        ("quantized", c_int),                          # 0=F32, 1=INT8 量化模式
+        ("attn_q_w_scales", POINTER(TensorHandle)),    # Q 投影 scales [28]
+        ("attn_k_w_scales", POINTER(TensorHandle)),    # K 投影 scales [28]
+        ("attn_v_w_scales", POINTER(TensorHandle)),    # V 投影 scales [28]
+        ("attn_o_w_scales", POINTER(TensorHandle)),    # O 投影 scales [28]
+        ("mlp_gate_w_scales", POINTER(TensorHandle)),  # Gate 投影 scales [28]
+        ("mlp_up_w_scales", POINTER(TensorHandle)),    # Up 投影 scales [28]
+        ("mlp_down_w_scales", POINTER(TensorHandle)),  # Down 投影 scales [28]
+        ("out_embed_scales", TensorHandle),            # LM head scales
     ]
 
 #  函数签名注册
@@ -89,3 +100,19 @@ def load_qwen2(lib):
         c_size_t
     ]
     lib.llaisysQwen2ModelInfer.restype = c_int64
+
+    # llaisysQwen2ModelInferEx (with sampling parameters)
+    lib.llaisysQwen2ModelInferEx.argtypes = [
+        c_void_p,          # model handle
+        POINTER(c_int64),  # token_ids
+        c_size_t,          # ntoken
+        ctypes.c_float,    # temperature
+        c_int,             # top_k
+        ctypes.c_float,    # top_p
+        ctypes.c_uint64,   # seed
+    ]
+    lib.llaisysQwen2ModelInferEx.restype = c_int64
+
+    # llaisysQwen2ModelReset
+    lib.llaisysQwen2ModelReset.argtypes = [c_void_p]
+    lib.llaisysQwen2ModelReset.restype = None

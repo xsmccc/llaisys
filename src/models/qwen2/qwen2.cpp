@@ -10,8 +10,109 @@
 #include <memory>
 #include <iostream>
 #include <cstring>
+#include <algorithm>
+#include <numeric>
+#include <random>
+#include <cmath>
 
 using namespace llaisys;
+
+// ============ Random Sampling Implementation ============
+
+/**
+ * Sample a token from logits using temperature, top-k, top-p.
+ *
+ * Pipeline: temperature scaling → softmax → top-k filter → top-p filter → multinomial
+ *
+ * @param logits     CPU buffer of logits [vocab_size], will be modified in-place
+ * @param vocab_size Number of vocabulary entries
+ * @param temperature Temperature for scaling (>1 = more random, <1 = more deterministic)
+ * @param top_k     Keep only top-k tokens (0 = disabled)
+ * @param top_p     Keep tokens with cumulative probability <= top_p (1.0 = disabled)
+ * @param seed      Random seed (0 = use random_device)
+ */
+static int64_t sample_token(float* logits, size_t vocab_size,
+                            float temperature, int top_k, float top_p,
+                            uint64_t seed) {
+    // 1. Temperature scaling
+    if (temperature > 0.0f && temperature != 1.0f) {
+        float inv_temp = 1.0f / temperature;
+        for (size_t i = 0; i < vocab_size; ++i) {
+            logits[i] *= inv_temp;
+        }
+    }
+
+    // 2. Softmax (numerically stable: subtract max first)
+    float max_logit = *std::max_element(logits, logits + vocab_size);
+    double sum_exp = 0.0;
+    for (size_t i = 0; i < vocab_size; ++i) {
+        logits[i] = std::exp(logits[i] - max_logit);
+        sum_exp += logits[i];
+    }
+    float inv_sum = static_cast<float>(1.0 / sum_exp);
+    for (size_t i = 0; i < vocab_size; ++i) {
+        logits[i] *= inv_sum;
+    }
+    // logits[] now contains probabilities
+
+    // 3. Build sorted index array for top-k / top-p filtering
+    std::vector<int64_t> indices(vocab_size);
+    std::iota(indices.begin(), indices.end(), 0);
+    std::sort(indices.begin(), indices.end(), [&](int64_t a, int64_t b) {
+        return logits[a] > logits[b];
+    });
+
+    // 4. Top-K: keep only top_k tokens
+    size_t cutoff = vocab_size;
+    if (top_k > 0 && static_cast<size_t>(top_k) < vocab_size) {
+        cutoff = static_cast<size_t>(top_k);
+    }
+
+    // 5. Top-P (nucleus): keep smallest set with cumulative prob >= top_p
+    if (top_p > 0.0f && top_p < 1.0f) {
+        double cumsum = 0.0;
+        for (size_t i = 0; i < cutoff; ++i) {
+            cumsum += logits[indices[i]];
+            if (cumsum >= static_cast<double>(top_p)) {
+                cutoff = i + 1;
+                break;
+            }
+        }
+    }
+
+    // 6. Zero out tokens beyond cutoff
+    for (size_t i = cutoff; i < vocab_size; ++i) {
+        logits[indices[i]] = 0.0f;
+    }
+
+    // 7. Renormalize
+    double new_sum = 0.0;
+    for (size_t i = 0; i < cutoff; ++i) {
+        new_sum += logits[indices[i]];
+    }
+    if (new_sum > 0.0) {
+        float inv_new_sum = static_cast<float>(1.0 / new_sum);
+        for (size_t i = 0; i < cutoff; ++i) {
+            logits[indices[i]] *= inv_new_sum;
+        }
+    }
+
+    // 8. Multinomial sampling
+    std::mt19937_64 rng(seed != 0 ? seed : std::random_device{}());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    float r = dist(rng);
+
+    double cumulative = 0.0;
+    for (size_t i = 0; i < cutoff; ++i) {
+        cumulative += logits[indices[i]];
+        if (r <= cumulative) {
+            return indices[i];
+        }
+    }
+
+    // Fallback: return the most probable token
+    return indices[0];
+}
 
 class Qwen2Model {
 public:
@@ -107,6 +208,89 @@ public:
         return output_token;
     }
 
+    /**
+     * Extended inference with random sampling support.
+     * Implements: temperature → softmax → top-k → top-p → multinomial
+     * Sampling is performed on CPU for cross-platform compatibility.
+     */
+    int64_t infer_ex(int64_t* token_ids, size_t ntoken,
+                     float temperature, int top_k, float top_p, uint64_t seed) {
+        // Distribute weights on first call only
+        if (!weights_distributed_) {
+            distribute_weights();
+            weights_distributed_ = true;
+        }
+
+        if (!weights_.in_embed) {
+            std::cerr << "[ERROR] Weights not loaded!" << std::endl;
+            return 0;
+        }
+
+        int64_t output_token = 0;
+
+        for (size_t i = 0; i < ntoken; ++i) {
+            if (i % 10 == 0) {
+                std::cerr << "\r[Qwen2] Token " << i << "/" << ntoken << std::flush;
+            }
+
+            int64_t token_val = token_ids[i];
+            ws_token_->load(&token_val);
+            embed_.forward(ws_hidden_, ws_token_);
+
+            int64_t pos_val = static_cast<int64_t>(current_pos_);
+            ws_pos_->load(&pos_val);
+
+            tensor_t current = ws_hidden_;
+            for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx) {
+                current = layers_[layer_idx].forward(current, current_pos_, ws_pos_);
+            }
+
+            final_norm_.forward(ws_final_norm_, current);
+            current_pos_++;
+
+            if (i == ntoken - 1) {
+                lm_head_.forward(ws_logits_, ws_final_norm_);
+
+                // Check if greedy decoding (argmax) is sufficient
+                bool is_greedy = (temperature <= 0.0f) ||
+                                 (top_k == 1) ||
+                                 (temperature == 1.0f && top_k <= 0 && top_p >= 1.0f);
+
+                if (is_greedy && top_k == 1) {
+                    // Use existing argmax for greedy decoding
+                    ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
+                    if (config_.device_type != LLAISYS_DEVICE_CPU) {
+                        const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(config_.device_type);
+                        core::context().runtime().synchronize();
+                        api->memcpy_sync(&output_token, ws_out_idx_->data(), sizeof(int64_t), LLAISYS_MEMCPY_D2H);
+                    } else {
+                        output_token = *reinterpret_cast<int64_t*>(ws_out_idx_->data());
+                    }
+                } else {
+                    // Random sampling: copy logits to CPU, then sample
+                    size_t vocab_size = config_.vocab_size;
+                    std::vector<float> logits(vocab_size);
+
+                    if (config_.device_type != LLAISYS_DEVICE_CPU) {
+                        const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(config_.device_type);
+                        core::context().runtime().synchronize();
+                        api->memcpy_sync(logits.data(), ws_logits_->data(),
+                                         vocab_size * sizeof(float), LLAISYS_MEMCPY_D2H);
+                    } else {
+                        std::memcpy(logits.data(), ws_logits_->data(),
+                                    vocab_size * sizeof(float));
+                    }
+
+                    output_token = sample_token(logits.data(), vocab_size,
+                                                temperature, top_k, top_p, seed);
+                }
+            }
+        }
+
+        std::cerr << std::endl;
+        return output_token;
+    }
+
     void reset() {
         current_pos_ = 0;
     }
@@ -161,6 +345,17 @@ private:
         weights_.mlp_up_w = new llaisysTensor_t[nlayers];
         weights_.mlp_down_w = new llaisysTensor_t[nlayers];
 
+        // INT8 量化 scales 数组
+        weights_.quantized = 0;
+        weights_.attn_q_w_scales = new llaisysTensor_t[nlayers];
+        weights_.attn_k_w_scales = new llaisysTensor_t[nlayers];
+        weights_.attn_v_w_scales = new llaisysTensor_t[nlayers];
+        weights_.attn_o_w_scales = new llaisysTensor_t[nlayers];
+        weights_.mlp_gate_w_scales = new llaisysTensor_t[nlayers];
+        weights_.mlp_up_w_scales = new llaisysTensor_t[nlayers];
+        weights_.mlp_down_w_scales = new llaisysTensor_t[nlayers];
+        weights_.out_embed_scales = nullptr;
+
         // Initialize to null
         std::memset(weights_.attn_q_w, 0, nlayers * sizeof(llaisysTensor_t));
         std::memset(weights_.attn_k_w, 0, nlayers * sizeof(llaisysTensor_t));
@@ -174,6 +369,13 @@ private:
         std::memset(weights_.mlp_gate_w, 0, nlayers * sizeof(llaisysTensor_t));
         std::memset(weights_.mlp_up_w, 0, nlayers * sizeof(llaisysTensor_t));
         std::memset(weights_.mlp_down_w, 0, nlayers * sizeof(llaisysTensor_t));
+        std::memset(weights_.attn_q_w_scales, 0, nlayers * sizeof(llaisysTensor_t));
+        std::memset(weights_.attn_k_w_scales, 0, nlayers * sizeof(llaisysTensor_t));
+        std::memset(weights_.attn_v_w_scales, 0, nlayers * sizeof(llaisysTensor_t));
+        std::memset(weights_.attn_o_w_scales, 0, nlayers * sizeof(llaisysTensor_t));
+        std::memset(weights_.mlp_gate_w_scales, 0, nlayers * sizeof(llaisysTensor_t));
+        std::memset(weights_.mlp_up_w_scales, 0, nlayers * sizeof(llaisysTensor_t));
+        std::memset(weights_.mlp_down_w_scales, 0, nlayers * sizeof(llaisysTensor_t));
     }
 
     void free_weight_arrays() {
@@ -189,15 +391,40 @@ private:
         delete[] weights_.mlp_gate_w;
         delete[] weights_.mlp_up_w;
         delete[] weights_.mlp_down_w;
+        // 量化 scales 数组
+        delete[] weights_.attn_q_w_scales;
+        delete[] weights_.attn_k_w_scales;
+        delete[] weights_.attn_v_w_scales;
+        delete[] weights_.attn_o_w_scales;
+        delete[] weights_.mlp_gate_w_scales;
+        delete[] weights_.mlp_up_w_scales;
+        delete[] weights_.mlp_down_w_scales;
     }
 
     void distribute_weights() {
         embed_.set_weight(weights_.in_embed);
         final_norm_.set_weight(weights_.out_norm_w);
-        lm_head_.set_params(weights_.out_embed);
 
-        for (size_t i = 0; i < layers_.size(); ++i) {
-            layers_[i].set_params(&weights_, i);
+        bool is_quantized = (weights_.quantized != 0);
+
+        if (is_quantized) {
+            // LM head 量化路径
+            if (weights_.out_embed_scales) {
+                lm_head_.set_params_quantized(weights_.out_embed, weights_.out_embed_scales);
+            } else {
+                lm_head_.set_params(weights_.out_embed);
+            }
+            // 每层使用量化 set_params
+            for (size_t i = 0; i < layers_.size(); ++i) {
+                layers_[i].set_params_quantized(&weights_, i);
+            }
+            std::cerr << "[Qwen2] Weights distributed (INT8 quantized mode)" << std::endl;
+        } else {
+            // 原有 F32 路径
+            lm_head_.set_params(weights_.out_embed);
+            for (size_t i = 0; i < layers_.size(); ++i) {
+                layers_[i].set_params(&weights_, i);
+            }
         }
     }
 };
@@ -238,6 +465,25 @@ __export int64_t llaisysQwen2ModelInfer(
 {
     if (!model || !model->impl) return 0;
     return model->impl->infer(token_ids, ntoken);
+}
+
+__export int64_t llaisysQwen2ModelInferEx(
+    struct LlaisysQwen2Model *model,
+    int64_t *token_ids,
+    size_t ntoken,
+    float temperature,
+    int top_k,
+    float top_p,
+    uint64_t seed)
+{
+    if (!model || !model->impl) return 0;
+    return model->impl->infer_ex(token_ids, ntoken, temperature, top_k, top_p, seed);
+}
+
+__export void llaisysQwen2ModelReset(struct LlaisysQwen2Model *model) {
+    if (model && model->impl) {
+        model->impl->reset();
+    }
 }
 
 } // extern "C"

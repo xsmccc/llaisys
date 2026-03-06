@@ -3,6 +3,7 @@
 #include "../../ops/add/op.hpp"
 #include "../../ops/embedding/op.hpp"
 #include "../../ops/linear/op.hpp"
+#include "../../ops/linear_quantized/op.hpp"
 #include "../../ops/rms_norm/op.hpp"
 #include <vector>
 #include <cstring>
@@ -73,22 +74,39 @@ private:
     float eps_;
 };
 
-// 线性变换层
+// 线性变换层 (支持 F32 和 W8A32 量化)
 class Linear {
 public:
     Linear() = default;
 
+    // 设置 F32 权重 (原有接口, 向后兼容)
     void set_params(void* w_handle, void* b_handle = nullptr) {
         weight_ = cast_handle(w_handle);
         if (b_handle) {
             bias_ = cast_handle(b_handle);
         }
+        quantized_ = false;
+    }
+
+    // 设置 INT8 量化权重 + per-channel scales
+    void set_params_quantized(void* w_handle, void* scales_handle,
+                              void* b_handle = nullptr) {
+        weight_ = cast_handle(w_handle);
+        scales_ = cast_handle(scales_handle);
+        if (b_handle) {
+            bias_ = cast_handle(b_handle);
+        }
+        quantized_ = (weight_ && scales_);
     }
 
     // 使用预分配输出张量
     void forward(tensor_t output, tensor_t input) {
         if (!weight_) return;
-        ops::linear(output, input, weight_, bias_);
+        if (quantized_ && scales_) {
+            ops::linear_quantized(output, input, weight_, scales_, bias_);
+        } else {
+            ops::linear(output, input, weight_, bias_);
+        }
     }
 
     tensor_t forward(tensor_t input) {
@@ -96,7 +114,7 @@ public:
         std::vector<size_t> out_shape = input->shape();
         out_shape.back() = weight_->shape()[0];
         auto out = Tensor::create(out_shape, input->dtype(), input->deviceType(), input->deviceId());
-        ops::linear(out, input, weight_, bias_);
+        forward(out, input);
         return out;
     }
 
@@ -104,9 +122,13 @@ public:
         return weight_ ? weight_->shape()[0] : 0;
     }
 
+    bool is_quantized() const { return quantized_; }
+
 private:
     tensor_t weight_;
     tensor_t bias_;
+    tensor_t scales_;     // per-channel F32 scales for W8A32
+    bool quantized_ = false;
 };
 
 } // namespace llaisys

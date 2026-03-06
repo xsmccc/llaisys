@@ -7,6 +7,12 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/self_attention_nvidia.hpp"
 #endif
+#ifdef ENABLE_METAX_API
+#include "metax/self_attention_metax.hpp"
+#endif
+#ifdef ENABLE_TIANSHU_API
+#include "tianshu/self_attention_tianshu.hpp"
+#endif
 
 /*
 维度检查
@@ -75,8 +81,34 @@ void self_attention(tensor_t attn_val, tensor_t q, tensor_t k, tensor_t v, float
                 scale
             );
     #endif
+    #ifdef ENABLE_METAX_API
+        case LLAISYS_DEVICE_METAX:
+            return metax::self_attention(
+                attn_val->data(), attn_val->dtype(),
+                q->data(),
+                k->data(),
+                v->data(),
+                seq_len, total_len,
+                nhead, kv_head,
+                head_dim, v_head_dim,
+                scale
+            );
+    #endif
+    #ifdef ENABLE_TIANSHU_API
+        case LLAISYS_DEVICE_TIANSHU:
+            return tianshu::self_attention(
+                attn_val->data(), attn_val->dtype(),
+                q->data(),
+                k->data(),
+                v->data(),
+                seq_len, total_len,
+                nhead, kv_head,
+                head_dim, v_head_dim,
+                scale
+            );
+    #endif
         default:
-            EXCEPTION_UNSUPPORTED_DEVICE;
+            ASSERT(false, "Unsupported device type for self_attention");
     }
 }
 } // namespace llaisys::ops

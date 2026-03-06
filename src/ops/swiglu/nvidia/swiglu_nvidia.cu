@@ -440,8 +440,8 @@ __global__ void swiglu_kernel_f16_vec4(
         // 上转 float，计算 SwiGLU，下转回 half2
         // 每个 half2 拆成 lo/hi → 2 个 float → silu → mul → 转回 half → 打包
         __half2 o_01 = __halves2half2(
-            __float2half(__half2float(__low2half(u_01)) * silu_f32(__half2float(__low2half(g_01)))),
-            __float2half(__half2float(__high2half(u_01)) * silu_f32(__half2float(__high2half(g_01)))));
+            __float2half(__half2float(__low2half(u_01)) * silu_f32(__half2float(__low2half(g_01)))),//low
+            __float2half(__half2float(__high2half(u_01)) * silu_f32(__half2float(__high2half(g_01)))));//high
         __half2 o_23 = __halves2half2(
             __float2half(__half2float(__low2half(u_23)) * silu_f32(__half2float(__low2half(g_23)))),
             __float2half(__half2float(__high2half(u_23)) * silu_f32(__half2float(__high2half(g_23)))));
@@ -629,7 +629,7 @@ void launch_swiglu_kernel(
 } // anonymous namespace
 
 // ╔═══════════════════════════════════════════════════════════════╗
-// ║                     对外接口                                  ║
+// ║                     对外接口                                   ║
 // ╚═══════════════════════════════════════════════════════════════╝
 // C++ 层调用入口，由 Python 端通过 ctypes 间接调用
 // 参数全部是 raw 指针 + 元数据，不涉及任何框架抽象

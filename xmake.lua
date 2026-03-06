@@ -24,6 +24,42 @@ if has_config("nv-gpu") then -- 如果启用 nv-gpu 选项
     includes("xmake/nvidia.lua") -- 引入 NVIDIA 相关构建配置
 end -- 结束条件判断
 
+-- MetaX MACA (沐曦 C500) --
+option("metax-gpu") -- 定义是否启用沐曦 GPU 的构建开关
+    set_default(false) -- 默认关闭 MACA 支持
+    set_showmenu(true) -- 允许在命令行菜单中显示该选项
+    set_description("Whether to compile implementations for MetaX GPU (MACA)") -- 选项说明
+option_end() -- 结束选项定义
+
+option("maca-arch") -- MACA GPU 架构版本
+    set_default("mp_22") -- 默认 mp_22 (C500 系列)
+    set_showmenu(true)
+    set_description("MACA GPU architecture (e.g. mp_21, mp_22)")
+option_end()
+
+if has_config("metax-gpu") then -- 如果启用 metax-gpu 选项
+    add_defines("ENABLE_METAX_API") -- 添加宏定义以开启 MetaX MACA API
+    includes("xmake/metax.lua") -- 引入 MetaX 相关构建配置
+end -- 结束条件判断
+
+-- Tianshu TOPSRIDER (天数智芯 BI-150) --
+option("tianshu-gpu") -- 定义是否启用天数智芯 GPU 的构建开关
+    set_default(false) -- 默认关闭 TOPSRIDER 支持
+    set_showmenu(true) -- 允许在命令行菜单中显示该选项
+    set_description("Whether to compile implementations for Tianshu GPU (TOPSRIDER)") -- 选项说明
+option_end() -- 结束选项定义
+
+option("tops-arch") -- TOPSRIDER GPU 架构版本
+    set_default("gcu300") -- 默认 gcu300 (BI-150 系列)
+    set_showmenu(true)
+    set_description("TOPSRIDER GPU architecture (e.g. gcu210, gcu300)")
+option_end()
+
+if has_config("tianshu-gpu") then -- 如果启用 tianshu-gpu 选项
+    add_defines("ENABLE_TIANSHU_API") -- 添加宏定义以开启 Tianshu TOPSRIDER API
+    includes("xmake/tianshu.lua") -- 引入 Tianshu 相关构建配置
+end -- 结束条件判断
+
 target("llaisys-utils") -- 定义工具库目标
     set_kind("static") -- 生成静态库
 
@@ -97,6 +133,14 @@ target("llaisys-ops") -- 定义算子层静态库
         add_deps("llaisys-ops-nvidia") -- 依赖 NVIDIA 算子实现
     end
 
+    if has_config("metax-gpu") then -- 若启用沐曦 GPU
+        add_deps("llaisys-ops-metax") -- 依赖 MetaX 算子实现
+    end
+
+    if has_config("tianshu-gpu") then -- 若启用天数智芯 GPU
+        add_deps("llaisys-ops-tianshu") -- 依赖 Tianshu 算子实现
+    end
+
     set_languages("cxx17") -- 使用 C++17 标准
     set_warnings("all", "error") -- 警告全开并视为错误
     if not is_plat("windows") then -- 非 Windows 平台
@@ -119,6 +163,7 @@ target("llaisys") -- 定义最终共享库目标
     set_warnings("all", "error") -- 警告全开并视为错误
     add_files("src/llaisys/*.cc") -- 添加对外接口实现
     add_files("src/models/qwen2/*.cpp") -- 添加 Qwen2 模型实现
+    add_files("src/models/deepseek_v2/*.cpp") -- 添加 DeepSeek-V2 模型实现
     add_files("src/device/*.cpp") -- 添加设备抽象层通用实现
     set_installdir(".") -- 安装目录为当前目录
     
@@ -145,7 +190,35 @@ target("llaisys") -- 定义最终共享库目标
         add_linkdirs(cuda_path .. "/lib64")  -- CUDA 库路径
         add_links("cudart", "cublas") -- 连接 libcudart.so (CUDA Runtime) + cuBLAS
         add_rpathdirs(cuda_path .. "/lib64") -- 运行时库查找路径
-    else
+    end
+
+    -- Add MetaX MACA support if enabled
+    -- 检查是否启用了沐曦 MetaX MACA 支持
+    if has_config("metax-gpu") then -- 若启用 MACA
+        add_rules("mxcc") -- 使用 mxcc 编译规则
+        add_files("src/device/metax/*.cu") -- 添加 MetaX 设备源码
+        add_cxflags("-fPIC") -- 位置无关代码
+        -- 自动检测 MACA 安装路径
+        local maca_path = os.getenv("MACA_PATH") or "/opt/maca"
+        add_linkdirs(maca_path .. "/lib")  -- MACA 库路径
+        add_links("macart", "macablas") -- 链接 libmacart.so (MACA Runtime) + macaBLAS
+        add_rpathdirs(maca_path .. "/lib") -- 运行时库查找路径
+    end
+
+    -- Add Tianshu TOPSRIDER support if enabled
+    -- 检查是否启用了天数智芯 TOPSRIDER 支持
+    if has_config("tianshu-gpu") then -- 若启用 TOPSRIDER
+        add_rules("topscc") -- 使用 topscc 编译规则
+        add_files("src/device/tianshu/*.cu") -- 添加 Tianshu 设备源码
+        add_cxflags("-fPIC") -- 位置无关代码
+        -- 自动检测 TOPSRIDER 安装路径
+        local tops_home = os.getenv("TOPS_HOME") or "/opt/tops"
+        add_linkdirs(tops_home .. "/lib")  -- TOPSRIDER 库路径
+        add_links("topsrt", "topsblas") -- 链接 libtopsrt.so (TOPS Runtime) + topsBLAS
+        add_rpathdirs(tops_home .. "/lib") -- 运行时库查找路径
+    end
+
+    if not has_config("nv-gpu") and not has_config("metax-gpu") and not has_config("tianshu-gpu") then
         -- Only CPU device when CUDA is not enabled
         add_deps("llaisys-device") -- 仅依赖 CPU 设备实现
     end

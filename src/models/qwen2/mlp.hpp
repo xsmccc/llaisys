@@ -25,6 +25,14 @@ public:
         down_proj_.set_params(down_handle);
     }
 
+    // 量化版本: 权重为 INT8 + per-channel scales
+    void set_params_quantized(void* gate_handle, void* up_handle, void* down_handle,
+                              void* gate_scales, void* up_scales, void* down_scales) {
+        gate_proj_.set_params_quantized(gate_handle, gate_scales);
+        up_proj_.set_params_quantized(up_handle, up_scales);
+        down_proj_.set_params_quantized(down_handle, down_scales);
+    }
+
     tensor_t forward(tensor_t input) {
         // 使用预分配张量
         if (ws_gate_) {

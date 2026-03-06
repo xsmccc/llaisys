@@ -27,6 +27,18 @@ __C {
         llaisysTensor_t *mlp_gate_w;
         llaisysTensor_t *mlp_up_w;
         llaisysTensor_t *mlp_down_w;
+        // ── W8A32 量化 per-channel scales (对称 absmax) ──
+        // 每个指针数组长度 = nlayer, 元素为 F32 张量 [out_features]
+        // 当 quantized=0 时这些指针全为 NULL，不影响原有逻辑
+        int quantized;                     // 0=F32, 1=INT8 量化模式
+        llaisysTensor_t *attn_q_w_scales;  // [nlayer] Q 投影 scales
+        llaisysTensor_t *attn_k_w_scales;  // [nlayer] K 投影 scales
+        llaisysTensor_t *attn_v_w_scales;  // [nlayer] V 投影 scales
+        llaisysTensor_t *attn_o_w_scales;  // [nlayer] O 投影 scales
+        llaisysTensor_t *mlp_gate_w_scales;// [nlayer] Gate 投影 scales
+        llaisysTensor_t *mlp_up_w_scales;  // [nlayer] Up 投影 scales
+        llaisysTensor_t *mlp_down_w_scales;// [nlayer] Down 投影 scales
+        llaisysTensor_t out_embed_scales;  // LM head scales (单个张量)
     };
 
     struct LlaisysQwen2Model;
@@ -38,5 +50,19 @@ __C {
     __export struct LlaisysQwen2Weights *llaisysQwen2ModelWeights(struct LlaisysQwen2Model * model);
 
     __export int64_t llaisysQwen2ModelInfer(struct LlaisysQwen2Model * model, int64_t * token_ids, size_t ntoken);
+
+    // Extended infer with sampling parameters
+    __export int64_t llaisysQwen2ModelInferEx(
+        struct LlaisysQwen2Model * model,
+        int64_t * token_ids,
+        size_t ntoken,
+        float temperature,
+        int top_k,
+        float top_p,
+        uint64_t seed
+    );
+
+    // Reset model state (KV cache position) for new conversation
+    __export void llaisysQwen2ModelReset(struct LlaisysQwen2Model * model);
 }
 #endif // LLAISYS_MODELS_QWEN2_H
