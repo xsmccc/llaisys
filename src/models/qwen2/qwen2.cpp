@@ -160,9 +160,10 @@ public:
         int64_t output_token = 0;
 
         for (size_t i = 0; i < ntoken; ++i) {
-            if (i % 10 == 0) {
-                std::cerr << "\r[Qwen2] Token " << i << "/" << ntoken << std::flush;
-            }
+            // Token progress log disabled for clean output
+            // if (i % 10 == 0) {
+            //     std::cerr << "\r[Qwen2] Token " << i << "/" << ntoken << std::flush;
+            // }
 
             // 1. 加载 token 到预分配张量
             int64_t token_val = token_ids[i];
@@ -229,9 +230,10 @@ public:
         int64_t output_token = 0;
 
         for (size_t i = 0; i < ntoken; ++i) {
-            if (i % 10 == 0) {
-                std::cerr << "\r[Qwen2] Token " << i << "/" << ntoken << std::flush;
-            }
+            // Token progress log disabled for clean output
+            // if (i % 10 == 0) {
+            //     std::cerr << "\r[Qwen2] Token " << i << "/" << ntoken << std::flush;
+            // }
 
             int64_t token_val = token_ids[i];
             ws_token_->load(&token_val);
@@ -356,6 +358,11 @@ private:
         weights_.mlp_down_w_scales = new llaisysTensor_t[nlayers];
         weights_.out_embed_scales = nullptr;
 
+        // INT4 K_orig 数组 (nlayer * 7 + 1: q,k,v,o,gate,up,down per layer + lm_head)
+        weights_.int4_group_size = 128;
+        weights_.int4_K_orig = new size_t[nlayers * 7 + 1];
+        std::memset(weights_.int4_K_orig, 0, (nlayers * 7 + 1) * sizeof(size_t));
+
         // Initialize to null
         std::memset(weights_.attn_q_w, 0, nlayers * sizeof(llaisysTensor_t));
         std::memset(weights_.attn_k_w, 0, nlayers * sizeof(llaisysTensor_t));
@@ -399,6 +406,7 @@ private:
         delete[] weights_.mlp_gate_w_scales;
         delete[] weights_.mlp_up_w_scales;
         delete[] weights_.mlp_down_w_scales;
+        delete[] weights_.int4_K_orig;
     }
 
     void distribute_weights() {
@@ -406,9 +414,25 @@ private:
         final_norm_.set_weight(weights_.out_norm_w);
 
         bool is_quantized = (weights_.quantized != 0);
+        bool is_int4 = (weights_.quantized == 2);
 
-        if (is_quantized) {
-            // LM head 量化路径
+        if (is_int4) {
+            // INT4 量化路径
+            if (weights_.out_embed_scales) {
+                size_t nlayer = layers_.size();
+                size_t lm_K = weights_.int4_K_orig[nlayer * 7];
+                lm_head_.set_params_int4(weights_.out_embed, weights_.out_embed_scales,
+                                         weights_.int4_group_size, lm_K);
+            } else {
+                lm_head_.set_params(weights_.out_embed);
+            }
+            for (size_t i = 0; i < layers_.size(); ++i) {
+                layers_[i].set_params_int4(&weights_, i);
+            }
+            std::cerr << "[Qwen2] Weights distributed (INT4 quantized mode, group_size="
+                      << weights_.int4_group_size << ")" << std::endl;
+        } else if (is_quantized) {
+            // INT8 量化路径
             if (weights_.out_embed_scales) {
                 lm_head_.set_params_quantized(weights_.out_embed, weights_.out_embed_scales);
             } else {

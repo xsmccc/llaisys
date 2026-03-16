@@ -49,7 +49,7 @@ namespace {
 cublasHandle_t get_cublas_handle() {
     static cublasHandle_t handle = nullptr;
     static std::once_flag flag;
-    std::call_once(flag, []() {
+    std::call_once(flag, []() { // C++11 线程安全的单例初始化
         cublasStatus_t st = cublasCreate(&handle);
         if (st != CUBLAS_STATUS_SUCCESS) {
             throw std::runtime_error("[cuBLAS] Failed to create handle");
@@ -57,6 +57,7 @@ cublasHandle_t get_cublas_handle() {
     });
     return handle;
 }
+
 
 inline void checkCuda(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {
@@ -70,6 +71,23 @@ inline void checkCublas(cublasStatus_t st, const char* msg) {
         std::cerr << "[cuBLAS ERROR] " << msg << ": status=" << static_cast<int>(st) << std::endl;
         throw std::runtime_error(msg);
     }
+}
+
+// ============================================================
+//  SM 版本检测
+// ============================================================
+int get_sm_version() {
+    static int ver = 0;
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        int major = 0, minor = 0;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
+        ver = major * 10 + minor;
+    });
+    return ver;
 }
 
 // ============================================================
@@ -264,7 +282,7 @@ inline void launch_bias_bf16(__nv_bfloat16* out, const __nv_bfloat16* bias, size
 }
 
 // ============================================================
-//  F32 Linear — cublasSgemm
+//  F32 Linear — cublasGemmEx Tensor Core (sm>=70) / cublasSgemm fallback
 // ============================================================
 void linear_f32(
     float* out,
@@ -276,32 +294,44 @@ void linear_f32(
     size_t rows           // M
 ) {
     cublasHandle_t handle = get_cublas_handle();
-
     const float alpha = 1.0f;
     const float beta  = 0.0f;
 
-    // out^T[N,M] = weight[N,K] × in^T[K,M]
-    // cuBLAS 视角：weight_ptr 是 [K,N] 列主序，需 OP_T → [N,K]
-    //              in_ptr 是 [K,M] 列主序，OP_N → [K,M]
-    checkCublas(
-        cublasSgemm(
-            handle,
-            CUBLAS_OP_T,            // transa: 转置 weight
-            CUBLAS_OP_N,            // transb: in 不转置
-            static_cast<int>(out_features),   // m = N
-            static_cast<int>(rows),           // n = M
-            static_cast<int>(in_features),    // k = K
-            &alpha,
-            weight,                           // A = weight, lda = K
-            static_cast<int>(in_features),    // lda
-            in,                               // B = in, ldb = K
-            static_cast<int>(in_features),    // ldb
-            &beta,
-            out,                              // C = out, ldc = N
-            static_cast<int>(out_features)    // ldc
-        ),
-        "cublasSgemm failed"
-    );
+    if (get_sm_version() >= 70) {
+        // ── Tensor Core 加速路径 (Volta+) ──
+        // cublasGemmEx + CUBLAS_COMPUTE_32F + TENSOR_OP:
+        //   cuBLAS 选择最优 GEMM 内核 (TF32 Tensor Core on sm>=80)
+        //   零额外显存开销，保持 FP32 累加精度
+        checkCublas(
+            cublasGemmEx(handle,
+                CUBLAS_OP_T, CUBLAS_OP_N,
+                (int)out_features, (int)rows, (int)in_features,
+                &alpha,
+                weight, CUDA_R_32F, (int)in_features,
+                in, CUDA_R_32F, (int)in_features,
+                &beta,
+                out, CUDA_R_32F, (int)out_features,
+                CUBLAS_COMPUTE_32F,
+                CUBLAS_GEMM_DEFAULT_TENSOR_OP),
+            "cublasGemmEx F32 TC-accelerated");
+    } else {
+        // ── FP32 FMA 回退路径 (sm < 70) ──
+        checkCublas(
+            cublasSgemm(
+                handle,
+                CUBLAS_OP_T, CUBLAS_OP_N,
+                static_cast<int>(out_features),
+                static_cast<int>(rows),
+                static_cast<int>(in_features),
+                &alpha,
+                weight, static_cast<int>(in_features),
+                in, static_cast<int>(in_features),
+                &beta,
+                out, static_cast<int>(out_features)
+            ),
+            "cublasSgemm failed"
+        );
+    }
 
     // 加偏置（float4 向量化 / 标量回退）
     if (bias != nullptr) {

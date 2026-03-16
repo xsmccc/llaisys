@@ -97,13 +97,34 @@ public:
             bias_ = cast_handle(b_handle);
         }
         quantized_ = (weight_ && scales_);
+        int4_mode_ = false;
+    }
+
+    // 设置 INT4 量化权重 + group-wise scales
+    void set_params_int4(void* w_packed_handle, void* scales_handle,
+                         size_t group_size, size_t K_orig,
+                         void* b_handle = nullptr) {
+        weight_ = cast_handle(w_packed_handle);
+        scales_ = cast_handle(scales_handle);
+        if (b_handle) {
+            bias_ = cast_handle(b_handle);
+        }
+        quantized_ = (weight_ && scales_);
+        int4_mode_ = true;
+        group_size_ = group_size;
+        K_orig_ = K_orig;
     }
 
     // 使用预分配输出张量
     void forward(tensor_t output, tensor_t input) {
         if (!weight_) return;
         if (quantized_ && scales_) {
-            ops::linear_quantized(output, input, weight_, scales_, bias_);
+            if (int4_mode_) {
+                ops::linear_quantized_int4(output, input, weight_, scales_, bias_,
+                                           group_size_, K_orig_);
+            } else {
+                ops::linear_quantized(output, input, weight_, scales_, bias_);
+            }
         } else {
             ops::linear(output, input, weight_, bias_);
         }
@@ -127,8 +148,11 @@ public:
 private:
     tensor_t weight_;
     tensor_t bias_;
-    tensor_t scales_;     // per-channel F32 scales for W8A32
+    tensor_t scales_;     // per-channel F32 scales (INT8) or group F16 scales (INT4)
     bool quantized_ = false;
+    bool int4_mode_ = false;
+    size_t group_size_ = 128;
+    size_t K_orig_ = 0;
 };
 
 } // namespace llaisys

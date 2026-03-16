@@ -64,6 +64,10 @@ class LlaisysQwen2Weights(ctypes.Structure):
         ("mlp_up_w_scales", POINTER(TensorHandle)),    # Up 投影 scales [28]
         ("mlp_down_w_scales", POINTER(TensorHandle)),  # Down 投影 scales [28]
         ("out_embed_scales", TensorHandle),            # LM head scales
+
+        # ===== INT4 group量化 (quantized=2) =====
+        ("int4_group_size", c_size_t),                 # 量化组大小 (128)
+        ("int4_K_orig", POINTER(c_size_t)),            # K_orig 数组 [nlayer*7+1]
     ]
 
 #  函数签名注册

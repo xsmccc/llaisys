@@ -21,6 +21,7 @@ CachingAllocator::~CachingAllocator() {
     allocated_sizes_.clear();
 }
 
+// best-fit算法
 std::byte *CachingAllocator::allocate(size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -35,6 +36,7 @@ std::byte *CachingAllocator::allocate(size_t size) {
             size_t actual_size = it->first;
             free_blocks_.erase(it);
             allocated_sizes_[ptr] = actual_size;
+            current_cache_bytes_ -= actual_size;
             cache_hits_++;
             return ptr;
         }
@@ -60,8 +62,28 @@ void CachingAllocator::release(std::byte *memory) {
     size_t size = it->second;
     allocated_sizes_.erase(it);
 
+    // 超过缓存上限时直接释放，避免 OOM
+    if (current_cache_bytes_ + size > MAX_CACHE_BYTES) {
+        _api->free_device(memory);
+        return;
+    }
+
     // 放入空闲列表而不是真正释放
     free_blocks_.emplace(size, memory);
+    current_cache_bytes_ += size;
+}
+
+CachingAllocator::Stats CachingAllocator::stats() const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(mutex_));
+    Stats s;
+    s.cache_hits = cache_hits_;
+    s.cache_misses = cache_misses_;
+    s.cached_blocks = free_blocks_.size();
+    s.cache_bytes = current_cache_bytes_;
+    s.active_blocks = allocated_sizes_.size();
+    s.active_bytes = 0;
+    for (auto& [ptr, sz] : allocated_sizes_) s.active_bytes += sz;
+    return s;
 }
 
 } // namespace llaisys::core::allocators

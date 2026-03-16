@@ -23,8 +23,8 @@ def main():
         help="Compute device (default: nvidia)",
     )
     parser.add_argument(
-        "--max-seq-len", type=int, default=512,
-        help="KV cache max sequence length (default: 512)",
+        "--max-seq-len", type=int, default=8192,
+        help="KV cache max sequence length (default: 4096)",
     )
     parser.add_argument(
         "--quantized", action="store_true",

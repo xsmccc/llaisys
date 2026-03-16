@@ -243,7 +243,7 @@ tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {
     // 输入参数有效性判断
     // 维度判断
     if (dim >= _meta.shape.size()){
-        throw std::runtime_error("Slice dimesion out of range.\n");
+        throw std::runtime_error("Slice dimension out of range.\n");
     }
     // 参数判断
     if (start > _meta.shape[dim] || start < 0 || end > _meta.shape[dim] || start >= end){
@@ -342,18 +342,112 @@ void Tensor::load(const void *src_) {
 }
 
 tensor_t Tensor::contiguous() const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    if (isContiguous()) {
+        // 已经连续，共享 storage 返回（零拷贝）
+        return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
+    }
+
+    // 非连续 → 分配新连续存储并逐元素拷贝
+    auto result = Tensor::create(_meta.shape, _meta.dtype, deviceType(), deviceId());
+    size_t elem_size = utils::dsize(_meta.dtype);
+    size_t total = numel();
+
+    if (deviceType() == LLAISYS_DEVICE_CPU) {
+        // CPU: 直接按 stride 逐元素拷贝
+        const std::byte* src_base = data();
+        std::byte* dst_base = result->data();
+        size_t ndim_ = ndim();
+
+        std::vector<size_t> idx(ndim_, 0);
+        for (size_t i = 0; i < total; i++) {
+            size_t src_off = 0;
+            for (size_t d = 0; d < ndim_; d++)
+                src_off += idx[d] * _meta.strides[d];
+
+            std::memcpy(dst_base + i * elem_size,
+                        src_base + src_off * elem_size,
+                        elem_size);
+
+            for (size_t d = ndim_; d-- > 0;) {
+                if (++idx[d] < _meta.shape[d]) break;
+                idx[d] = 0;
+            }
+        }
+    } else {
+        // GPU: 先 D2H，CPU 端做 contiguous，再 H2D
+        auto host_src = Tensor::create({_storage->size()}, LLAISYS_DTYPE_BYTE);
+        const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(deviceType());
+        api->memcpy_sync(host_src->data(), _storage->memory(),
+                         _storage->size(), LLAISYS_MEMCPY_D2H);
+
+        const std::byte* src_base = host_src->data() + _offset;
+        size_t ndim_ = ndim();
+        std::vector<std::byte> contiguous_buf(total * elem_size);
+        std::vector<size_t> idx(ndim_, 0);
+        for (size_t i = 0; i < total; i++) {
+            size_t src_off = 0;
+            for (size_t d = 0; d < ndim_; d++)
+                src_off += idx[d] * _meta.strides[d];
+            std::memcpy(contiguous_buf.data() + i * elem_size,
+                        src_base + src_off * elem_size,
+                        elem_size);
+            for (size_t d = ndim_; d-- > 0;) {
+                if (++idx[d] < _meta.shape[d]) break;
+                idx[d] = 0;
+            }
+        }
+
+        api->memcpy_sync(result->data(), contiguous_buf.data(),
+                         total * elem_size, LLAISYS_MEMCPY_H2D);
+    }
+    return result;
 }
 
 tensor_t Tensor::reshape(const std::vector<size_t> &shape) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    // reshape = contiguous + view
+    if (isContiguous()) {
+        return view(shape);
+    }
+    auto contig = contiguous();
+    return contig->view(shape);
 }
 
 tensor_t Tensor::to(llaisysDeviceType_t device_type, int device) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    int target_dev = (device < 0) ? 0 : device;
+
+    // 已经在目标设备上，直接返回共享副本
+    if (deviceType() == device_type && deviceId() == target_dev) {
+        return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
+    }
+
+    // 先确保连续（跨设备拷贝不支持 stride 布局）
+    auto src = isContiguous()
+        ? std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset))
+        : contiguous();
+
+    // 在目标设备上分配新张量
+    auto dst = Tensor::create(_meta.shape, _meta.dtype, device_type, target_dev);
+    size_t bytes = src->numel() * src->elementSize();
+
+    // 确定拷贝方向
+    llaisysMemcpyKind_t kind;
+    if (deviceType() == LLAISYS_DEVICE_CPU && device_type != LLAISYS_DEVICE_CPU) {
+        kind = LLAISYS_MEMCPY_H2D;
+    } else if (deviceType() != LLAISYS_DEVICE_CPU && device_type == LLAISYS_DEVICE_CPU) {
+        kind = LLAISYS_MEMCPY_D2H;
+    } else if (deviceType() == LLAISYS_DEVICE_CPU && device_type == LLAISYS_DEVICE_CPU) {
+        kind = LLAISYS_MEMCPY_H2H;
+    } else {
+        kind = LLAISYS_MEMCPY_D2D;
+    }
+
+    // 使用源或目标设备的 API 执行拷贝
+    const LlaisysRuntimeAPI* api = (deviceType() != LLAISYS_DEVICE_CPU)
+        ? llaisysGetRuntimeAPI(deviceType())
+        : llaisysGetRuntimeAPI(device_type);
+    api->memcpy_sync(dst->data(), src->data(), bytes, kind);
+
+    return dst;
 }
 
 } // namespace llaisys

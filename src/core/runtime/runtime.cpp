@@ -8,7 +8,9 @@ namespace llaisys::core {
 
     // Runtime 构造函数，初始化成员变量并创建流和分配器
 Runtime::Runtime(llaisysDeviceType_t device_type, int device_id)
-    : _device_type(device_type), _device_id(device_id), _is_active(false) {
+    : _device_type(device_type),
+      _device_id(device_id),
+      _is_active(false) {
     // 获取对应设备的API
     _api = llaisys::device::getRuntimeAPI(_device_type);
     //    ├─ CPU → 返回 cpu_runtime_api
@@ -34,7 +36,7 @@ Runtime::~Runtime() {
         std::cerr << "Mallicious destruction of inactive runtime." << std::endl;
     }
     delete _allocator;
-    _allocator = nullptr;
+    _allocator = nullptr;   //置空指针的习惯，防止悬空指针
     _api->destroy_stream(_stream);
     _api = nullptr;
 }

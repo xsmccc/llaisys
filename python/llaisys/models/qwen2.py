@@ -30,20 +30,21 @@ except ImportError:
 
 class Qwen2:
     def __init__(self, model_path, device: DeviceType = DeviceType.CPU,
-                 max_seq_len: int = 512, quantized: bool = False):
+                 max_seq_len: int = 8192, quantized: bool = False, int4: bool = False):
         """Initialize Qwen2 model and load weights from safetensors or quantized npz
         
         Args:
             model_path: 模型文件夹路径
             device: 计算设备 (CPU / NVIDIA)
-            max_seq_len: KV cache 最大序列长度（默认 512）。
+            max_seq_len: KV cache 最大序列长度（默认 4096）。
                          直接影响 GPU 显存占用：每层 KV cache = 2 × max_seq_len × nkvh × dh × 4B。
-                         8GB GPU 建议 512，A100 (80GB) 可设为 4096 甚至 131072。
+                         8GB GPU 约 224MB (4096), A100 可设 32768+。配合 FlashAttention 支持更长序列。
             quantized: 是否加载 INT8 量化权重 (quantized_weights.npz)
         """
         self.model_path = Path(model_path) # 模型文件夹路径
         self.device = device #计算设备
         self.quantized = quantized
+        self.int4 = int4
         self._kept_references = [] # 保持python对象引用，防止被回收
 
         # 读取config.json文件
@@ -87,7 +88,9 @@ class Qwen2:
         # 创建C++后端模型
         print(f"[Qwen2] Initializing C++ Backend...")
         print(f"        Layers: {self.meta.nlayer}, Hidden: {self.meta.hs}, Heads: {self.meta.nh}")
-        if self.quantized:
+        if self.int4:
+            print(f"        Mode: INT4 Quantized (W4A32, group_size=128)")
+        elif self.quantized:
             print(f"        Mode: INT8 Quantized (W8A32)")
 
         # 调用C函数创建模型
@@ -107,7 +110,9 @@ class Qwen2:
 
         # 加载权重
         print(f"[Qwen2] Loading weights from {model_path}...")
-        if self.quantized:
+        if self.int4:
+            self._load_quantized_int4(self.model_path)
+        elif self.quantized:
             self._load_quantized(self.model_path)
         else:
             self._load_safetensors(self.model_path)
@@ -245,6 +250,10 @@ class Qwen2:
             dtype = DataType.I8
         elif array.dtype == np.float32:
             dtype = DataType.F32
+        elif array.dtype == np.uint8:
+            dtype = DataType.U8
+        elif array.dtype == np.float16:
+            dtype = DataType.F16
         else:
             raise ValueError(f"Unsupported numpy dtype: {array.dtype}")
 
@@ -389,6 +398,94 @@ class Qwen2:
                 w.mlp_up_w_scales[layer_idx] = ptr
             elif suffix == "mlp.down_proj.weight":
                 w.mlp_down_w_scales[layer_idx] = ptr
+
+    def _load_quantized_int4(self, path: Path):
+        """加载 INT4 量化权重 (quantized_weights_int4.npz)"""
+        npz_path = path / "quantized_weights_int4.npz"
+        if not npz_path.exists():
+            # 尝试 INT4 子目录
+            int4_dir = path.parent / (path.name + "-INT4")
+            npz_path = int4_dir / "quantized_weights_int4.npz"
+            if not npz_path.exists():
+                raise FileNotFoundError(f"INT4 weights not found at {npz_path}")
+            path = int4_dir
+
+        # 读取量化配置
+        config_path = path / "quantize_config.json"
+        group_size = 128
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                quant_config = json.load(f)
+            group_size = quant_config.get("group_size", 128)
+            quantized_names = set(quant_config.get("quantized_weights", []))
+            print(f"  INT4 quantized weights: {len(quantized_names)}, group_size={group_size}")
+        else:
+            quantized_names = set()
+
+        print(f"  Loading {npz_path.name}...")
+        data = np.load(str(npz_path))
+
+        w = self.c_weights
+        w.quantized = 2  # INT4 mode
+        w.int4_group_size = group_size
+
+        # 填充 int4_K_orig 数组
+        nlayer = self.meta.nlayer
+        # weight name → offset mapping (层内 q=0,k=1,v=2,o=3, gate=4,up=5,down=6)
+        suffix_to_offset = {
+            "self_attn.q_proj.weight": 0,
+            "self_attn.k_proj.weight": 1,
+            "self_attn.v_proj.weight": 2,
+            "self_attn.o_proj.weight": 3,
+            "mlp.gate_proj.weight": 4,
+            "mlp.up_proj.weight": 5,
+            "mlp.down_proj.weight": 6,
+        }
+
+        for key in data.files:
+            arr = data[key]
+
+            # .meta 条目: 提取 K_orig 并存入 int4_K_orig
+            if key.endswith(".meta"):
+                weight_name = key[:-len(".meta")]
+                meta_vals = arr  # [N_orig, K_orig, K_padded, group_size]
+                K_orig = int(meta_vals[1])
+
+                if weight_name == "lm_head.weight":
+                    w.int4_K_orig[nlayer * 7] = K_orig
+                elif weight_name.startswith("model.layers."):
+                    parts = weight_name.split(".")
+                    layer_idx = int(parts[2])
+                    suffix = ".".join(parts[3:])
+                    if suffix in suffix_to_offset and layer_idx < nlayer:
+                        w.int4_K_orig[layer_idx * 7 + suffix_to_offset[suffix]] = K_orig
+                continue
+
+            # .scales 条目: FP16 group scales
+            if key.endswith(".scales"):
+                original_name = key[:-len(".scales")]
+                ptr = self._create_tensor_from_numpy(arr.astype(np.float16))
+                if ptr is None:
+                    continue
+                self._map_scale(original_name, ptr)
+                continue
+
+            # 权重条目
+            name = key
+            is_quantized_weight = (name in quantized_names) or (arr.dtype == np.uint8)
+
+            if is_quantized_weight:
+                # INT4 packed权重 (U8)
+                ptr = self._create_tensor_from_numpy(arr.astype(np.uint8))
+            else:
+                # F32 权重 (embedding, norm, bias 等)
+                ptr = self._create_tensor_from_numpy(arr.astype(np.float32))
+
+            if ptr is None:
+                continue
+            self._map_weight_ptr(name, ptr)
+
+        print(f"  INT4 quantized weights loaded successfully (W4A32 mode, group_size={group_size})")
 
     def generate(
         self,

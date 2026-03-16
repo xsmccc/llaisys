@@ -8,6 +8,9 @@
 #include "../ops/embedding/op.hpp"
 #include "../ops/linear/op.hpp"
 #include "../ops/linear_quantized/op.hpp"
+#ifdef ENABLE_NVIDIA_API
+#include "../ops/linear_quantized/nvidia/linear_quantized_nvidia.hpp"
+#endif
 #include "../ops/rearrange/op.hpp"
 #include "../ops/rms_norm/op.hpp"
 #include "../ops/rope/op.hpp"
@@ -27,7 +30,7 @@ __C {
         llaisys::ops::embedding(out->tensor, index->tensor, weight->tensor);
     }
     void llaisysLinear(llaisysTensor_t out, llaisysTensor_t in, llaisysTensor_t weight, llaisysTensor_t bias) {
-        llaisys::ops::linear(out->tensor, in->tensor, weight->tensor, bias->tensor);
+        llaisys::ops::linear(out->tensor, in->tensor, weight->tensor, bias ? bias->tensor : nullptr);
     }
     void llaisysLinearQuantized(llaisysTensor_t out, llaisysTensor_t in, llaisysTensor_t weight, llaisysTensor_t scales, llaisysTensor_t bias) {
         llaisys::ops::linear_quantized(out->tensor, in->tensor, weight->tensor,
@@ -47,5 +50,10 @@ __C {
     }
     void llaisysSwiGLU(llaisysTensor_t out, llaisysTensor_t gate, llaisysTensor_t up) {
         llaisys::ops::swiglu(out->tensor, gate->tensor, up->tensor);
+    }
+    void llaisysCleanupQuantizedWeightCache(void) {
+#ifdef ENABLE_NVIDIA_API
+        ::llaisys::ops::nvidia::cleanup_quantized_weight_cache();
+#endif
     }
 }

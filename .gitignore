@@ -96,3 +96,7 @@ docs/
 learning/
 *.md
 !README.md
+# Backup files
+*.bak
+# Clangd cache
+.clangd/

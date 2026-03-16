@@ -10,6 +10,7 @@ __C {
     __export void llaisysLinear(llaisysTensor_t out, llaisysTensor_t in, llaisysTensor_t weight, llaisysTensor_t bias);
     // W8A32 量化 Linear: weight(I8) + scales(F32) → dequant → F32 GEMM
     __export void llaisysLinearQuantized(llaisysTensor_t out, llaisysTensor_t in, llaisysTensor_t weight, llaisysTensor_t scales, llaisysTensor_t bias);
+    __export void llaisysCleanupQuantizedWeightCache(void);
     __export void llaisysRearrange(llaisysTensor_t out, llaisysTensor_t in);
     __export void llaisysRmsNorm(llaisysTensor_t out, llaisysTensor_t in, llaisysTensor_t weight, float eps);
     __export void llaisysROPE(llaisysTensor_t out, llaisysTensor_t in, llaisysTensor_t pos_ids, float theta);

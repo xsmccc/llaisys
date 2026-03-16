@@ -33,6 +33,15 @@ public:
         down_proj_.set_params_quantized(down_handle, down_scales);
     }
 
+    // INT4 量化版本: packed U8 权重 + group F16 scales
+    void set_params_int4(void* gate_handle, void* up_handle, void* down_handle,
+                         void* gate_scales, void* up_scales, void* down_scales,
+                         size_t gs, size_t gate_K, size_t up_K, size_t down_K) {
+        gate_proj_.set_params_int4(gate_handle, gate_scales, gs, gate_K);
+        up_proj_.set_params_int4(up_handle, up_scales, gs, up_K);
+        down_proj_.set_params_int4(down_handle, down_scales, gs, down_K);
+    }
+
     tensor_t forward(tensor_t input) {
         // 使用预分配张量
         if (ws_gate_) {

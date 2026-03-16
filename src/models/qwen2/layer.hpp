@@ -53,6 +53,40 @@ public:
         post_attn_norm_.set_weight(w->mlp_norm_w[layer_idx]);
     }
 
+    // INT4 量化版本: packed U8 权重 + group F16 scales
+    void set_params_int4(const LlaisysQwen2Weights* w, size_t layer_idx) {
+        size_t gs = w->int4_group_size;
+        // 从 int4_K_orig 数组获取 K_orig
+        // layout: [nlayer*7+1], 层内顺序: q,k,v,o, gate,up,down
+        size_t base = layer_idx * 7;
+        size_t q_K = w->int4_K_orig[base + 0];
+        size_t k_K = w->int4_K_orig[base + 1];
+        size_t v_K = w->int4_K_orig[base + 2];
+        size_t o_K = w->int4_K_orig[base + 3];
+        size_t gate_K = w->int4_K_orig[base + 4];
+        size_t up_K = w->int4_K_orig[base + 5];
+        size_t down_K = w->int4_K_orig[base + 6];
+
+        attn_.set_params_int4(
+            w->attn_q_w[layer_idx], w->attn_k_w[layer_idx],
+            w->attn_v_w[layer_idx], w->attn_o_w[layer_idx],
+            w->attn_q_b[layer_idx], w->attn_k_b[layer_idx],
+            w->attn_v_b[layer_idx],
+            w->attn_q_w_scales[layer_idx], w->attn_k_w_scales[layer_idx],
+            w->attn_v_w_scales[layer_idx], w->attn_o_w_scales[layer_idx],
+            gs, q_K, k_K, v_K, o_K
+        );
+        mlp_.set_params_int4(
+            w->mlp_gate_w[layer_idx], w->mlp_up_w[layer_idx],
+            w->mlp_down_w[layer_idx],
+            w->mlp_gate_w_scales[layer_idx], w->mlp_up_w_scales[layer_idx],
+            w->mlp_down_w_scales[layer_idx],
+            gs, gate_K, up_K, down_K
+        );
+        input_norm_.set_weight(w->attn_norm_w[layer_idx]);
+        post_attn_norm_.set_weight(w->mlp_norm_w[layer_idx]);
+    }
+
     // 优化版：使用预分配张量 + 外部 pos_tensor
     tensor_t forward(tensor_t x, size_t pos, tensor_t pos_tensor) {
         auto residual = x;

@@ -31,6 +31,21 @@ private:
     // 统计信息
     size_t cache_hits_ = 0;
     size_t cache_misses_ = 0;
+
+    // 缓存大小跟踪与限制
+    size_t current_cache_bytes_ = 0;
+    static constexpr size_t MAX_CACHE_BYTES = 4ULL * 1024 * 1024 * 1024;  // 4GB 上限
+
+public:
+    struct Stats {
+        size_t cache_hits;
+        size_t cache_misses;
+        size_t cached_blocks;
+        size_t cache_bytes;
+        size_t active_blocks;
+        size_t active_bytes;
+    };
+    Stats stats() const;
 };
 
 } // namespace llaisys::core::allocators

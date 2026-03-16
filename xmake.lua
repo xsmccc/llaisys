@@ -1,6 +1,20 @@
 add_rules("mode.debug", "mode.release") -- 添加调试/发布构建模式
 set_encodings("utf-8") -- 设置源码/输出编码为 UTF-8
 
+local function get_metax_sdk_paths()
+    local maca_path = os.getenv("MACA_PATH") or os.getenv("MACA_HOME") or "/opt/maca"
+    if not os.isdir(maca_path) and os.getenv("MXCC") and os.isfile(os.getenv("MXCC")) then
+        maca_path = path.directory(path.directory(os.getenv("MXCC")))
+    end
+
+    local libdir = path.join(maca_path, "lib64")
+    if not os.isdir(libdir) then
+        libdir = path.join(maca_path, "lib")
+    end
+
+    return maca_path, libdir
+end
+
 add_includedirs("include") -- 添加头文件全局搜索路径
 
 -- CPU --
@@ -163,7 +177,7 @@ target("llaisys") -- 定义最终共享库目标
     set_warnings("all", "error") -- 警告全开并视为错误
     add_files("src/llaisys/*.cc") -- 添加对外接口实现
     add_files("src/models/qwen2/*.cpp") -- 添加 Qwen2 模型实现
-    add_files("src/models/deepseek_v2/*.cpp") -- 添加 DeepSeek-V2 模型实现
+    add_files("src/models/llama3/*.cpp") -- 添加 LLaMA3 模型实现
     add_files("src/device/*.cpp") -- 添加设备抽象层通用实现
     set_installdir(".") -- 安装目录为当前目录
     
@@ -188,7 +202,7 @@ target("llaisys") -- 定义最终共享库目标
         -- 自动检测 CUDA 安装路径
         local cuda_path = os.getenv("CUDA_PATH") or os.getenv("CUDA_HOME") or "/usr/local/cuda"
         add_linkdirs(cuda_path .. "/lib64")  -- CUDA 库路径
-        add_links("cudart", "cublas") -- 连接 libcudart.so (CUDA Runtime) + cuBLAS
+        add_links("cudart", "cublas", "cublasLt") -- 连接 libcudart.so (CUDA Runtime) + cuBLAS
         add_rpathdirs(cuda_path .. "/lib64") -- 运行时库查找路径
     end
 
@@ -199,10 +213,11 @@ target("llaisys") -- 定义最终共享库目标
         add_files("src/device/metax/*.cu") -- 添加 MetaX 设备源码
         add_cxflags("-fPIC") -- 位置无关代码
         -- 自动检测 MACA 安装路径
-        local maca_path = os.getenv("MACA_PATH") or "/opt/maca"
-        add_linkdirs(maca_path .. "/lib")  -- MACA 库路径
+        local maca_path, maca_libdir = get_metax_sdk_paths()
+        add_includedirs(path.join(maca_path, "include"))
+        add_linkdirs(maca_libdir)  -- MACA 库路径
         add_links("macart", "macablas") -- 链接 libmacart.so (MACA Runtime) + macaBLAS
-        add_rpathdirs(maca_path .. "/lib") -- 运行时库查找路径
+        add_rpathdirs(maca_libdir) -- 运行时库查找路径
     end
 
     -- Add Tianshu TOPSRIDER support if enabled

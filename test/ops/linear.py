@@ -30,6 +30,8 @@ def test_op_linear(
     bias, bias_ = None, None
     if use_bias:
         bias, bias_ = random_tensor((w_shape[0],), dtype_name, device_name)
+    else:
+        bias_ = None  # pass None → nullptr to C API
 
     out, out_ = random_tensor(out_shape, dtype_name, device_name)
     torch_linear(out, x, w, bias)
@@ -55,6 +57,10 @@ if __name__ == "__main__":
     testShapes = [
         ((2, 3), (2, 4), (3, 4), True),
         ((512, 4096), (512, 4096), (4096, 4096), True),
+        # Edge cases
+        ((1, 2048), (1, 4096), (2048, 4096), True),   # M=1 decode (GEMV)
+        ((7, 5), (7, 11), (5, 11), False),             # non-power-of-2, no bias
+        ((1, 1), (1, 1), (1, 1), True),                # minimal
     ]
     testDtypePrec = [
         # type, atol, rtol

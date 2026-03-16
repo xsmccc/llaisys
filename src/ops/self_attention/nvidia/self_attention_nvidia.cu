@@ -168,7 +168,7 @@ __global__ void self_attention_fused(
     // 动态: scores[total_len] + warp_buf[WARPS] + s_q[head_dim]
     extern __shared__ char smem_bytes[];
     float* scores   = reinterpret_cast<float*>(smem_bytes);
-    float* warp_buf = scores + total_len;
+    float* warp_buf = scores + total_len; // 是 block reduce 的临时空间，WARPS 个 float
     float* s_q      = warp_buf + WARPS;           // Q 行（预转 float）
 
     // 静态: 用于广播归约结果
@@ -234,7 +234,7 @@ __global__ void self_attention_fused(
     // ── 3a: 求全局最大值 (数值稳定性) ──
     float local_max = -INFINITY;
     for (size_t t = threadIdx.x; t < total_len; t += blockDim.x) {
-        local_max = fmaxf(local_max, scores[t]);
+         local_max = fmaxf(local_max, scores[t]);
     }
     local_max = block_reduce_max(local_max, warp_buf);
     if (threadIdx.x == 0) s_max = local_max;
@@ -280,6 +280,179 @@ __global__ void self_attention_fused(
     }
 }
 
+
+// ============================================================
+//  FlashAttention v2 Kernel — Tiled Online Softmax (优化版)
+// ============================================================
+//
+//  核心思想：将 KV 序列分成 Bc 大小的 tile，逐 tile 处理。
+//  维护在线统计量 m (running max) 和 l (running sum)，
+//  O_acc 保存未归一化的加权输出，最终除以 l 得到结果。
+//
+//  更新公式（处理第 j 个 tile）:
+//    m_new     = max(m_old, tile_max)
+//    correction = exp(m_old - m_new)
+//    O_acc     = O_acc * correction + sum_t(exp(s_t - m_new) * V[t])
+//    l_new     = l_old * correction + sum_t(exp(s_t - m_new))
+//
+//  ── 优化要点 ──
+//    1. Q 预加载到共享内存（float, 复用多个 tile）
+//    2. K/V tile 加载到共享内存 → 避免重复全局内存访问
+//    3. tile_scores 存共享内存，供 block-wide softmax reduce
+//    4. scores@V 直接从共享内存的 s_v 读取
+//
+//  ── Shared Memory 布局 ──
+//    s_q[head_dim]:            Q 行（float）
+//    s_k[Bc * head_dim]:       K tile（T 类型）
+//    s_v[Bc * v_head_dim]:     V tile（T 类型）
+//    warp_buf[WARPS]:          block reduce 空间
+//    tile_scores[Bc]:          当前 tile 的 softmax scores（float）
+//    Bc编译时常量
+template <typename T, int Bc>
+__global__ void flash_attention_kernel(
+    T* __restrict__       attn_val,   // [seq_len, nhead, v_head_dim]
+    const T* __restrict__ q,          // [seq_len, nhead, head_dim]
+    const T* __restrict__ k,          // [total_len, kv_head, head_dim]
+    const T* __restrict__ v,          // [total_len, kv_head, v_head_dim]
+    size_t seq_len,
+    size_t total_len,
+    size_t nhead,
+    size_t kv_head,
+    size_t head_dim,
+    size_t v_head_dim,
+    float scale
+) {
+    const size_t i    = blockIdx.x;
+    const size_t h    = blockIdx.y;
+    const size_t kv_h = h / (nhead / kv_head);
+
+    // ── Shared Memory 布局 ──
+    extern __shared__ char smem_bytes[];
+    float* s_q      = reinterpret_cast<float*>(smem_bytes);
+    T*     s_k      = reinterpret_cast<T*>(s_q + head_dim);
+    T*     s_v      = reinterpret_cast<T*>(s_k + Bc * head_dim);
+    float* warp_buf = reinterpret_cast<float*>(s_v + Bc * v_head_dim);
+    float* tile_scores = warp_buf + WARPS;  // [Bc]
+
+    __shared__ float s_tile_max;
+    __shared__ float s_tile_sum;
+
+    // ── Causal 位置 ──
+    const size_t current_pos = total_len - seq_len + i;
+    const size_t kv_len = current_pos + 1;
+    const size_t num_tiles = (kv_len + Bc - 1) / Bc;
+
+    const size_t kv_stride   = kv_head * head_dim;
+    const size_t kv_v_stride = kv_head * v_head_dim;
+
+    // ── 预加载 Q ──
+    const T* q_row = q + i * nhead * head_dim + h * head_dim;
+    for (size_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        s_q[d] = to_float(q_row[d]);
+    }
+    __syncthreads();
+
+    // ── 每线程的 online softmax 状态 ──
+    constexpr int MAX_DV = 4;
+    float o_acc[MAX_DV];
+    for (int r = 0; r < MAX_DV; r++) o_acc[r] = 0.0f;
+
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+
+    // ═══════════════ 主循环: 逐 tile 处理 KV ═══════════════
+    for (size_t tile = 0; tile < num_tiles; tile++) {
+        const size_t tile_start = tile * Bc;
+        const size_t tile_end   = min(tile_start + (size_t)Bc, kv_len);
+        const int    tile_len   = (int)(tile_end - tile_start);
+
+        // ── 加载 K tile 到 shared memory ──
+        for (size_t idx = threadIdx.x; idx < (size_t)tile_len * head_dim; idx += blockDim.x) {
+            size_t t_local = idx / head_dim;
+            size_t d       = idx % head_dim;
+            s_k[t_local * head_dim + d] = k[(tile_start + t_local) * kv_stride + kv_h * head_dim + d];
+        }
+
+        // ── 加载 V tile 到 shared memory ──
+        for (size_t idx = threadIdx.x; idx < (size_t)tile_len * v_head_dim; idx += blockDim.x) {
+            size_t t_local = idx / v_head_dim;
+            size_t d       = idx % v_head_dim;
+            s_v[t_local * v_head_dim + d] = v[(tile_start + t_local) * kv_v_stride + kv_h * v_head_dim + d];
+        }
+        __syncthreads();
+
+        // ── QK^T: 每线程计算若干个 score ──
+        for (int t = threadIdx.x; t < tile_len; t += blockDim.x) {
+            float dot = 0.0f;
+            const T* k_local = s_k + t * head_dim;
+            for (size_t d = 0; d < head_dim; d++) {
+                dot += s_q[d] * to_float(k_local[d]);
+            }
+            tile_scores[t] = dot * scale;
+        }
+        __syncthreads();
+
+        // ── Tile max (block reduce) ──
+        float local_max = -INFINITY;
+        for (int t = threadIdx.x; t < tile_len; t += blockDim.x) {
+            local_max = fmaxf(local_max, tile_scores[t]);
+        }
+        local_max = block_reduce_max(local_max, warp_buf);
+        if (threadIdx.x == 0) s_tile_max = local_max;
+        __syncthreads();
+        float tile_max = s_tile_max;
+
+        // ── exp(score - tile_max) 写回 tile_scores ──
+        for (int t = threadIdx.x; t < tile_len; t += blockDim.x) {
+            tile_scores[t] = expf(tile_scores[t] - tile_max);
+        }
+        __syncthreads();
+
+        // ── Tile sum (block reduce) ──
+        float local_sum = 0.0f;
+        for (int t = threadIdx.x; t < tile_len; t += blockDim.x) {
+            local_sum += tile_scores[t];
+        }
+        local_sum = block_reduce_sum(local_sum, warp_buf);
+        if (threadIdx.x == 0) s_tile_sum = local_sum;
+        __syncthreads();
+        float tile_sum = s_tile_sum;
+
+        // ── Online softmax 更新 ──
+        float new_max = fmaxf(running_max, tile_max);
+        float old_correction = expf(running_max - new_max);
+        float new_correction = expf(tile_max - new_max);
+        float new_sum = running_sum * old_correction + tile_sum * new_correction;
+
+        // ── 更新 O_acc ──
+        int dv_idx = 0;
+        for (size_t dv = threadIdx.x; dv < v_head_dim; dv += blockDim.x, dv_idx++) {
+            // Rescale 旧累积
+            o_acc[dv_idx] *= old_correction;
+            // 累加新 tile: sum_t(score[t] * V[t,dv]) * new_correction
+            float val = 0.0f;
+            for (int t = 0; t < tile_len; t++) {
+                val += tile_scores[t] * to_float(s_v[t * v_head_dim + dv]);
+            }
+            o_acc[dv_idx] += val * new_correction;
+        }
+
+        running_max = new_max;
+        running_sum = new_sum;
+        __syncthreads();
+    }
+
+    // ── 最终归一化 ──
+    T* out_row = attn_val + i * nhead * v_head_dim + h * v_head_dim;
+    float inv_sum = (running_sum > 0.0f) ? (1.0f / running_sum) : 0.0f;
+
+    int dv_idx = 0;
+    for (size_t dv = threadIdx.x; dv < v_head_dim; dv += blockDim.x, dv_idx++) {
+        out_row[dv] = from_float<T>(o_acc[dv_idx] * inv_sum);
+    }
+}
+
+
 } // anonymous namespace
 
 // ============================================================
@@ -303,42 +476,80 @@ void self_attention(
 ) {
     dim3 grid(static_cast<unsigned>(seq_len), static_cast<unsigned>(nhead));
     constexpr int threads = THREADS;
-    // 动态共享内存: scores[total_len] + warp_buf[WARPS] + s_q[head_dim]
-    size_t smem_size = (total_len + WARPS + head_dim) * sizeof(float);
 
-    switch (dtype) {
-    case LLAISYS_DTYPE_F32:
-        self_attention_fused<float><<<grid, threads, smem_size>>>(
-            reinterpret_cast<float*>(attn_val_ptr),
-            reinterpret_cast<const float*>(q),
-            reinterpret_cast<const float*>(k),
-            reinterpret_cast<const float*>(v),
-            seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
-        );
-        break;
-    case LLAISYS_DTYPE_F16:
-        self_attention_fused<__half><<<grid, threads, smem_size>>>(
-            reinterpret_cast<__half*>(attn_val_ptr),
-            reinterpret_cast<const __half*>(q),
-            reinterpret_cast<const __half*>(k),
-            reinterpret_cast<const __half*>(v),
-            seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
-        );
-        break;
-    case LLAISYS_DTYPE_BF16:
-        self_attention_fused<__nv_bfloat16><<<grid, threads, smem_size>>>(
-            reinterpret_cast<__nv_bfloat16*>(attn_val_ptr),
-            reinterpret_cast<const __nv_bfloat16*>(q),
-            reinterpret_cast<const __nv_bfloat16*>(k),
-            reinterpret_cast<const __nv_bfloat16*>(v),
-            seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
-        );
-        break;
-    default:
-        EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
+    // ── 策略选择 ──
+    // FlashAttention: 分 tile 处理 KV，O(Bc) 共享内存，支持任意长序列
+    // Naive Fused:    scores[total_len] 全存 shared memory，短序列更快
+    // 阈值: shared memory 48KB，scores+warp_buf+Q 能装下则用 naive
+    size_t naive_smem = (total_len + WARPS + head_dim) * sizeof(float);
+    constexpr size_t SMEM_LIMIT = 48 * 1024;  // 48KB
+
+    bool use_flash = (naive_smem > SMEM_LIMIT);
+
+    if (use_flash) {
+        // ── FlashAttention 路径 ──
+        // Bc 选择: F32 用 Bc=32（更大的元素），F16/BF16 用 Bc=64
+        // 共享内存: s_q[head_dim]*4 + s_k[Bc*head_dim]*sizeof(T) + s_v[Bc*v_head_dim]*sizeof(T) + warp_buf[WARPS]*4 +  tile_scores[Bc]*4
+        auto launch_flash = [&](auto* dummy_t, auto dtype_tag) {
+            using DT = std::remove_pointer_t<decltype(dummy_t)>;
+            constexpr int Bc_val = (sizeof(DT) <= 2) ? 64 : 32;
+            size_t flash_smem = head_dim * sizeof(float)                // s_q
+                              + Bc_val * head_dim * sizeof(DT)          // s_k
+                              + Bc_val * v_head_dim * sizeof(DT)        // s_v
+                              + (WARPS + Bc_val) * sizeof(float);       // warp_buf + tile_scores
+            flash_attention_kernel<DT, Bc_val><<<grid, threads, flash_smem>>>(
+                reinterpret_cast<DT*>(attn_val_ptr),
+                reinterpret_cast<const DT*>(q),
+                reinterpret_cast<const DT*>(k),
+                reinterpret_cast<const DT*>(v),
+                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
+            );
+        };
+
+        switch (dtype) {
+        case LLAISYS_DTYPE_F32:  { float* p = nullptr; launch_flash(p, 0); break; }
+        case LLAISYS_DTYPE_F16:  { __half* p = nullptr; launch_flash(p, 0); break; }
+        case LLAISYS_DTYPE_BF16: { __nv_bfloat16* p = nullptr; launch_flash(p, 0); break; }
+        default: EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
+        }
+        checkCuda(cudaGetLastError(), "flash_attention_kernel launch failed");
+    } else {
+        // ── Naive Fused 路径（短序列快速路径）──
+        size_t smem_size = naive_smem;
+
+        switch (dtype) {
+        case LLAISYS_DTYPE_F32:
+            self_attention_fused<float><<<grid, threads, smem_size>>>(
+                reinterpret_cast<float*>(attn_val_ptr),
+                reinterpret_cast<const float*>(q),
+                reinterpret_cast<const float*>(k),
+                reinterpret_cast<const float*>(v),
+                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
+            );
+            break;
+        case LLAISYS_DTYPE_F16:
+            self_attention_fused<__half><<<grid, threads, smem_size>>>(
+                reinterpret_cast<__half*>(attn_val_ptr),
+                reinterpret_cast<const __half*>(q),
+                reinterpret_cast<const __half*>(k),
+                reinterpret_cast<const __half*>(v),
+                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
+            );
+            break;
+        case LLAISYS_DTYPE_BF16:
+            self_attention_fused<__nv_bfloat16><<<grid, threads, smem_size>>>(
+                reinterpret_cast<__nv_bfloat16*>(attn_val_ptr),
+                reinterpret_cast<const __nv_bfloat16*>(q),
+                reinterpret_cast<const __nv_bfloat16*>(k),
+                reinterpret_cast<const __nv_bfloat16*>(v),
+                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
+            );
+            break;
+        default:
+            EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
+        }
+        checkCuda(cudaGetLastError(), "self_attention_fused kernel launch failed");
     }
-
-    checkCuda(cudaGetLastError(), "self_attention_fused kernel launch failed");
 }
 
 } // namespace llaisys::ops::nvidia

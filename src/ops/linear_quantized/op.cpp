@@ -134,4 +134,80 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight,
     }
 }
 
+
+void linear_quantized_int4(tensor_t out, tensor_t in, tensor_t weight_packed,
+                           tensor_t scales, tensor_t bias,
+                           size_t group_size, size_t K_orig) {
+    // ── 维度提取 ──
+    size_t N = weight_packed->shape()[0];       // out_features
+    size_t K_packed = weight_packed->shape()[1]; // K_orig / 2
+    size_t num_groups = scales->shape()[1];      // K_orig / group_size
+
+    // ── 维度检查 ──
+    ASSERT(K_orig == K_packed * 2,
+           "LinearQuantizedINT4: K_orig must be 2 * K_packed");
+    ASSERT(in->shape().back() == K_orig,
+           "LinearQuantizedINT4: input feature dim mismatch");
+    ASSERT(out->shape().back() == N,
+           "LinearQuantizedINT4: output feature dim mismatch");
+    size_t rows = in->numel() / K_orig;
+    ASSERT(out->numel() / N == rows,
+           "LinearQuantizedINT4: input/output rows mismatch");
+
+    // ── 类型检查 ──
+    ASSERT(weight_packed->dtype() == LLAISYS_DTYPE_U8,
+           "LinearQuantizedINT4: weight must be U8 (packed INT4)");
+    ASSERT(in->dtype() == LLAISYS_DTYPE_F32,
+           "LinearQuantizedINT4: input must be F32");
+    ASSERT(out->dtype() == LLAISYS_DTYPE_F32,
+           "LinearQuantizedINT4: output must be F32");
+    ASSERT(scales->dtype() == LLAISYS_DTYPE_F16,
+           "LinearQuantizedINT4: scales must be F16");
+    ASSERT(scales->shape()[0] == N,
+           "LinearQuantizedINT4: scales shape[0] must match N");
+    ASSERT(num_groups == K_orig / group_size,
+           "LinearQuantizedINT4: num_groups mismatch");
+
+    // ── Bias 检查 ──
+    bool has_bias = (bias != nullptr) && (bias->numel() > 0);
+    if (has_bias) {
+        ASSERT(bias->dtype() == LLAISYS_DTYPE_F32,
+               "LinearQuantizedINT4: bias must be F32");
+        ASSERT(bias->numel() == N,
+               "LinearQuantizedINT4: bias shape mismatch");
+        CHECK_SAME_DEVICE(out, in, weight_packed, scales, bias);
+    } else {
+        CHECK_SAME_DEVICE(out, in, weight_packed, scales);
+    }
+
+    // ── 连续性检查 ──
+    ASSERT(out->isContiguous() && in->isContiguous() &&
+           weight_packed->isContiguous() && scales->isContiguous(),
+           "LinearQuantizedINT4: all inputs must be contiguous");
+
+    // ── 设备上下文 ──
+    llaisys::core::context().setDevice(in->deviceType(), in->deviceId());
+
+    // ── 调度到设备后端 ──
+    switch (in->deviceType()) {
+    #ifdef ENABLE_NVIDIA_API
+        case LLAISYS_DEVICE_NVIDIA:
+            return nvidia::linear_quantized_int4(
+                out->data(),
+                in->data(),
+                weight_packed->data(),
+                scales->data(),
+                has_bias ? bias->data() : nullptr,
+                K_orig,         // in_features
+                N,              // out_features
+                rows,           // M
+                num_groups,
+                group_size
+            );
+    #endif
+        default:
+            ASSERT(false, "LinearQuantizedINT4: only NVIDIA backend supported");
+    }
+}
+
 } // namespace llaisys::ops

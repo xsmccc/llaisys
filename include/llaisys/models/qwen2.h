@@ -39,6 +39,13 @@ __C {
         llaisysTensor_t *mlp_up_w_scales;  // [nlayer] Up 投影 scales
         llaisysTensor_t *mlp_down_w_scales;// [nlayer] Down 投影 scales
         llaisysTensor_t out_embed_scales;  // LM head scales (单个张量)
+
+        // ── W4A32 INT4 group量化 ──
+        // quantized=2 表示 INT4 模式
+        // 权重为 U8 packed (2×int4 per byte), scales 为 F16 [N, num_groups]
+        size_t int4_group_size;                // 量化组大小 (128)
+        // K_orig arrays: 每层 7 个权重 (q,k,v,o, gate,up,down) + lm_head
+        size_t *int4_K_orig;                   // [nlayer*7+1] 原始 K 维度
     };
 
     struct LlaisysQwen2Model;

@@ -34,7 +34,7 @@ target("llaisys-device-nvidia") -- 定义 NVIDIA 设备静态库目标
     
     -- Link with CUDA Runtime library
     -- 连接CUDA Runtime库
-    add_syslinks("cudart", "cublas", {tools = "nvcc"}) -- 链接 CUDA 运行时库 + cuBLAS
+    add_syslinks("cudart", "cublas", "cublasLt", {tools = "nvcc"}) -- 链接 CUDA 运行时库 + cuBLAS
 
     on_install(function (target) end) -- 安装阶段占位
 target_end() -- 结束目标定义

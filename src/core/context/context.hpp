@@ -39,7 +39,7 @@ public:
     //获取当前激活的Runtime
     Runtime &runtime();
 
-    friend Context &context();
+    friend Context &context();  //全局函数是友元
 };
 } // namespace llaisys::core
 /*

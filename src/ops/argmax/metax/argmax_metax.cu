@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <cfloat>
+#include <mutex>
 
 namespace {
 
@@ -208,13 +209,17 @@ struct TempReduceBuffer {
     float* vals = nullptr;
     size_t* idxs = nullptr;
     int capacity = 0;
+    std::mutex mtx;
 
     void ensure(int num_blocks) {
+        std::lock_guard<std::mutex> lock(mtx);
         if (num_blocks <= capacity) return;
         if (vals) cudaFree(vals);
         if (idxs) cudaFree(idxs);
-        cudaMalloc(&vals, num_blocks * sizeof(float));
-        cudaMalloc(&idxs, num_blocks * sizeof(size_t));
+        checkCuda(cudaMalloc(&vals, num_blocks * sizeof(float)),
+                  "TempReduceBuffer: cudaMalloc vals failed");
+        checkCuda(cudaMalloc(&idxs, num_blocks * sizeof(size_t)),
+                  "TempReduceBuffer: cudaMalloc idxs failed");
         capacity = num_blocks;
     }
 };

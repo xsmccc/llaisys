@@ -4,18 +4,18 @@
 #include <stdexcept>
 
 namespace llaisys {
-struct CustomFloat16 {
-    uint16_t _v;
+struct CustomFloat16 {// 自定义半精度浮点数-16位无符号整数表示
+    uint16_t _v;// C++标准没有半精度浮点数类型，因此我们使用一个结构体来表示它，并提供转换函数。
 };
 typedef struct CustomFloat16 fp16_t;
 
 struct CustomBFloat16 {
-    uint16_t _v;
+    uint16_t _v;// 同上，自定义bfloat16类型
 };
 typedef struct CustomBFloat16 bf16_t;
 
 namespace utils {
-inline size_t dsize(llaisysDataType_t dtype) {
+inline size_t dsize(llaisysDataType_t dtype) { // inline告知编译器允许在多个翻译单元中定义该函数，但链接器会确保只有一个实例被使用。可以减少函数调用的开销。
     switch (dtype) {
     case LLAISYS_DTYPE_BYTE:
         return sizeof(char);
@@ -115,7 +115,7 @@ bf16_t _f32_to_bf16(float val);
 
 template <typename TypeTo, typename TypeFrom>
 TypeTo cast(TypeFrom val) {
-    if constexpr (std::is_same<TypeTo, TypeFrom>::value) {
+    if constexpr (std::is_same<TypeTo, TypeFrom>::value) {//编译器分支条件
         return val;
     } else if constexpr (std::is_same<TypeTo, fp16_t>::value && std::is_same<TypeFrom, float>::value) {
         return _f32_to_f16(val);

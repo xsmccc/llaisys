@@ -34,6 +34,17 @@ public:
         o_proj_.set_params_quantized(o_w, o_s);
     }
 
+    // INT4 量化版本: packed U8 权重 + group F16 scales
+    void set_params_int4(void* q_w, void* k_w, void* v_w, void* o_w,
+                         void* q_b, void* k_b, void* v_b,
+                         void* q_s, void* k_s, void* v_s, void* o_s,
+                         size_t gs, size_t q_K, size_t k_K, size_t v_K, size_t o_K) {
+        q_proj_.set_params_int4(q_w, q_s, gs, q_K, q_b);
+        k_proj_.set_params_int4(k_w, k_s, gs, k_K, k_b);
+        v_proj_.set_params_int4(v_w, v_s, gs, v_K, v_b);
+        o_proj_.set_params_int4(o_w, o_s, gs, o_K);
+    }
+
     // 优化版 forward：接受外部传入的 pos_tensor（每 token 只创建一次）
     tensor_t forward(tensor_t x, size_t pos, tensor_t pos_tensor) {
         // Q, K, V 投影 — 使用预分配输出张量

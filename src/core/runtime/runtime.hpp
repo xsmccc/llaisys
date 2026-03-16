@@ -24,11 +24,11 @@ public:
 
     ~Runtime();
 
-    // Prevent copying
+    // 禁止拷贝
     Runtime(const Runtime &) = delete;
     Runtime &operator=(const Runtime &) = delete;
 
-    // Prevent moving
+    // 禁止移动/无法更改指向
     Runtime(Runtime &&) = delete;
     Runtime &operator=(Runtime &&) = delete;
 
