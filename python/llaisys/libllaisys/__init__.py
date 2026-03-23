@@ -13,7 +13,6 @@ from .tensor import llaisysTensor_t
 from .tensor import load_tensor
 from .ops import load_ops
 from .qwen2 import load_qwen2
-from .llama3 import load_llama3
 
 
 def load_shared_library():
@@ -41,7 +40,11 @@ load_runtime(LIB_LLAISYS)
 load_tensor(LIB_LLAISYS)
 load_ops(LIB_LLAISYS)
 load_qwen2(LIB_LLAISYS)
-load_llama3(LIB_LLAISYS)
+try:
+    from .llama3 import load_llama3
+    load_llama3(LIB_LLAISYS)
+except (AttributeError, OSError):
+    pass  # LLaMA3 symbols not compiled
 
 
 __all__ = [

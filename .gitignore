@@ -89,13 +89,12 @@ Thumbs.db
 ehthumbs.db
 desktop.ini
 
-models/
+# Model weights (root-level only, not src/models/)
+/models/
 
-# Local study notes / docs (do not upload)
-docs/
-learning/
-*.md
-!README.md
+# Local study notes
+/learning/
+
 # Backup files
 *.bak
 # Clangd cache
