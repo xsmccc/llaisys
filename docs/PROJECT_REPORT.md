@@ -373,15 +373,18 @@ git clone https://github.com/xsmccc/llaisys.git && cd llaisys
 xmake f --nv-gpu=y -cv
 xmake build
 
-# 同步 .so 到 Python 包
+# 同步 .so 到 Python 包（必须在 pip install 之前）
 cp build/linux/x86_64/release/libllaisys.so python/llaisys/libllaisys/
+
+# 安装 Python 包
+pip install -e python/
 ```
 
 ### 9.3 Python 环境
 
 ```bash
 python -m venv venv && source venv/bin/activate
-pip install torch transformers accelerate safetensors numpy fastapi uvicorn
+pip install torch transformers accelerate safetensors numpy
 ```
 
 ### 9.4 下载模型
@@ -403,11 +406,11 @@ modelscope download deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
 ```bash
 # 算子正确性测试（全部 8 个）
 for test in test/ops/*.py; do
-    PYTHONPATH=python:test python3 "$test" --device nvidia
+    python3 "$test" --device nvidia
 done
 
 # 端到端推理正确性测试
-PYTHONPATH=python:test python3 test/test_infer.py \
+python3 test/test_infer.py \
     --device nvidia --model models/DeepSeek-R1-Distill-Qwen-1.5B --test
 ```
 
@@ -415,7 +418,7 @@ PYTHONPATH=python:test python3 test/test_infer.py \
 
 ```bash
 # FP32 推理
-PYTHONPATH=python python3 -c "
+python3 -c "
 from llaisys.models import Qwen2
 from llaisys import DeviceType
 from transformers import AutoTokenizer
@@ -433,12 +436,12 @@ print(tok.decode(out[len(ids):], skip_special_tokens=True))
 
 ```bash
 # 量化
-PYTHONPATH=python python3 scripts/quantize_model.py \
+python3 scripts/quantize_model.py \
     --model-path models/DeepSeek-R1-Distill-Qwen-1.5B \
     --output-dir models/DeepSeek-R1-Distill-Qwen-1.5B-INT8
 
 # 推理
-PYTHONPATH=python python3 -c "
+python3 -c "
 from llaisys.models import Qwen2; from llaisys import DeviceType
 model = Qwen2('models/DeepSeek-R1-Distill-Qwen-1.5B-INT8', DeviceType.NVIDIA, quantized=True)
 "
@@ -448,13 +451,13 @@ model = Qwen2('models/DeepSeek-R1-Distill-Qwen-1.5B-INT8', DeviceType.NVIDIA, qu
 
 ```bash
 # 量化（约 10 分钟）
-PYTHONPATH=python python3 scripts/quantize_model_int4.py \
+python3 scripts/quantize_model_int4.py \
     --model-path models/DeepSeek-R1-Distill-Qwen-1.5B \
     --output-dir models/DeepSeek-R1-Distill-Qwen-1.5B-INT4 \
     --group-size 128
 
 # 推理
-PYTHONPATH=python python3 -c "
+python3 -c "
 from llaisys.models import Qwen2; from llaisys import DeviceType
 model = Qwen2('models/DeepSeek-R1-Distill-Qwen-1.5B-INT4', DeviceType.NVIDIA, int4=True)
 "
@@ -465,7 +468,7 @@ model = Qwen2('models/DeepSeek-R1-Distill-Qwen-1.5B-INT4', DeviceType.NVIDIA, in
 ```bash
 huggingface-cli download meta-llama/Llama-3.2-1B --local-dir models/Llama-3.2-1B
 
-PYTHONPATH=python python3 -c "
+python3 -c "
 from llaisys.models import Llama3; from llaisys import DeviceType
 from transformers import AutoTokenizer
 
@@ -480,7 +483,7 @@ print(tok.decode(out, skip_special_tokens=True))
 ### 9.10 启动 Chat Server
 
 ```bash
-PYTHONPATH=python python3 -m llaisys.server \
+python3 -m llaisys.server \
     --model models/DeepSeek-R1-Distill-Qwen-1.5B --device nvidia
 
 # 浏览器访问 http://localhost:8000
