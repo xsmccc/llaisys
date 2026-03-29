@@ -99,3 +99,19 @@ desktop.ini
 *.bak
 # Clangd cache
 .clangd/
+*.nsys-rep
+*.gemv
+
+
+# Local config
+.clangd
+.copilot/
+
+# Benchmark reports and profiling data
+/report/
+
+# Changelog (local only)
+CHANGELOG.md
+
+# Copilot instructions
+.github/instructions/
