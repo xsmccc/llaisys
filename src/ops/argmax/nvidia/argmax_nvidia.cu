@@ -2,19 +2,19 @@
  * @file argmax_nvidia.cu
  * @brief Argmax 算子的 CUDA 实现
  *
- * ── 算子特性分析 ──────────────────────────────────────────
+ * ── 算子特性分析 ---
  *   类型：归约操作（Reduction）
  *   输入：1D 张量 vals[numel]
  *   输出：max_val（最大值），max_idx（最大值索引），都是标量
  *
- * ── 归约的核心挑战 ────────────────────────────────────────
+ * ── 归约的核心挑战 ---
  *   N 个元素需要通过 log2(N) 轮比较合并为 1 个结果。
  *   GPU 上的实现分三层：
  *     1. Warp 内归约：使用 __shfl_down_sync（warp shuffle），无需共享内存
  *     2. Block 内归约：多个 warp 结果写入 shared memory，再由 warp 0 归约
  *     3. Grid 级归约：多个 block 结果通过 atomicCAS 或二次 kernel 合并
  *
- * ── Warp Shuffle 原理 ────────────────────────────────────
+ * ── Warp Shuffle 原理 ---
  *   __shfl_down_sync(mask, val, delta) :
  *     lane i 读取 lane (i + delta) 的 val，不经过内存，直接寄存器交换
  *     mask = 0xffffffff 表示 warp 内全部 32 个线程参与
@@ -26,7 +26,7 @@
  *     step 2 (delta=1): lane0 比较 lane1 → max(3,9)=9
  *             最终 [9, -, -, -]  → lane0 持有全局最大值
  *
- * ── 本实现策略 ────────────────────────────────────────────
+ * ── 本实现策略 ---
  *   目前 argmax 测试 shape 最大为 (4096,)。使用单 block 实现：
  *   - 1 个 block，256 线程
  *   - 每个线程用 grid-stride 遍历所有元素，找到自己的局部最大值
@@ -96,7 +96,7 @@ __global__ void argmax_kernel(
     const T* __restrict__ vals,
     size_t numel
 ) {
-    // --- Step 1: 每线程找局部最大值 ---
+    // 每线程找局部最大值
     float local_max = -FLT_MAX;
     size_t local_idx = 0;
 
@@ -109,10 +109,10 @@ __global__ void argmax_kernel(
         }
     }
 
-    // --- Step 2: Warp 内归约 ---
+    // Warp 内归约
     warp_reduce_max(local_max, local_idx);
 
-    // --- Step 3: Warp 间归约（通过 shared memory）---
+    // Warp 间归约（通过 shared memory）
     // 每个 warp 的 lane 0 把结果写入 shared memory
     __shared__ float s_val[32];   // 最多 32 个 warp（1024 线程 / 32）
     __shared__ size_t s_idx[32];
@@ -127,7 +127,7 @@ __global__ void argmax_kernel(
     }
     __syncthreads();
 
-    // --- Step 4: Warp 0 做最终归约 ---
+    // Warp 0 做最终归约
     if (warp_id == 0) {
         // 只让前 num_warps 个 lane 参与
         float val = (lane < num_warps) ? s_val[lane] : -FLT_MAX;
@@ -257,7 +257,6 @@ __global__ void argmax_phase2(
         }
     }
 }
-
 
 // ============================================================
 //  持久化临时缓冲区（避免每次 cudaMalloc/cudaFree 的开销）

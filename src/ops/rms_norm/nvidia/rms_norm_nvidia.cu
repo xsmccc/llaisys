@@ -2,7 +2,7 @@
  * @file rms_norm_nvidia.cu
  * @brief RMSNorm 算子的 CUDA 实现
  *
- * ── 算子公式 ────────────────────────────────────────────
+ * ── 算子公式 ---
  *   Y_i = W_i * X_i / sqrt( mean(X^2) + eps )
  *
  *   对每一行（长度 d）做归一化：
@@ -10,16 +10,16 @@
  *     2. 计算 inv_rms = 1 / sqrt(sum_sq / d + eps)
  *     3. 逐元素：out[j] = weight[j] * in[j] * inv_rms
  *
- * ── 算子特性 ────────────────────────────────────────────
+ * ── 算子特性 ---
  *   类型：归约 + elementwise 混合型
- *   Step 1 （归约）：block 内线程协作算 sum_sq → warp shuffle + shared memory
- *   Step 2 （elementwise）：每线程独立算 out[j] = w[j] * in[j] * inv_rms
+ *   归约阶段：block 内线程协作算 sum_sq → warp shuffle + shared memory
+ *   逐元素阶段：每线程独立算 out[j] = w[j] * in[j] * inv_rms
  *
- * ── 线程映射 ────────────────────────────────────────────
+ * ── 线程映射 ---
  *   grid:  (rows, 1, 1)  — 每个 block 处理一行
  *   block: (256, 1, 1)   — block 内线程分工处理列
  *
- * ── Warp Shuffle Reduce 在 RMSNorm 中的应用 ─────────────
+ * ── Warp Shuffle Reduce 在 RMSNorm 中的应用 ---
  *   和 argmax 类似，但这里归约的是 float 求和（不是找最大值）：
  *     for (delta = 16; delta >= 1; delta >>= 1)
  *         val += __shfl_down_sync(mask, val, delta);
@@ -106,9 +106,6 @@ __device__ float block_reduce_sum(float val) {
 // ============================================================
 //  RMSNorm Kernel — float4 向量化版
 // ============================================================
-// 优化点：
-//   原始版本：标量逐元素读写（LD.32/LD.16）→ 内存事务数多
-//   优化版本：float4 读写（LD.128/ST.128）→ 内存事务数减少 4x(F32)/8x(F16)
 //
 //   F32: float4 = 4 个 float = 16B → vec_cols = cols / 4
 //   F16/BF16: float4 = 8 个 half = 16B → vec_cols = cols / 8

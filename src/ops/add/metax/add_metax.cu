@@ -5,7 +5,7 @@
  * 沐曦 MACA SDK 提供 CUDA 兼容 API，mxcc 编译器编译标准 .cu 语法。
  * 算子逻辑与 NVIDIA 版本一致：float4 向量化 + Grid-Stride Loop。
  *
- * 【MetaX C500 适配注意事项】
+ * MetaX C500 适配注意事项
  *   - Warp Size: C500 可能使用 128 线程/warp，需验证 __shfl_down_sync 行为
  *   - 本算子不涉及 warp shuffle（纯 elementwise），无需 warp 适配
  *   - float4 向量化在 MACA 上同样有效（LD.128 指令）

@@ -170,8 +170,8 @@ bool Tensor::isContiguous() const {
     if (_meta.shape.empty()) return true;
     size_t accumulated = 1;
     for (size_t i = _meta.shape.size(); i-- > 0;) {
-        // _meta.strides[i] 是 ptrdiff_t，这里强转一下比较
-        if ((size_t)_meta.strides[i] != accumulated) {
+        // size-1 维度的 stride 不影响连续性（PyTorch 语义）
+        if (_meta.shape[i] != 1 && (size_t)_meta.strides[i] != accumulated) {
             return false;
         }
         accumulated *= _meta.shape[i];
@@ -236,7 +236,7 @@ tensor_t Tensor::view(const std::vector<size_t> &shape) const {
     new_meta.shape = shape;
     new_meta.strides = new_strides;
 
-    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage));
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, _offset));
 }
 
 tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {

@@ -18,4 +18,5 @@ void self_attention(
     size_t v_head_dim,
     float scale
 );
+void cleanup_self_attention_workspace();
 } // namespace llaisys::ops::nvidia

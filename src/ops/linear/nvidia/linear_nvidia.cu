@@ -2,14 +2,14 @@
  * @file linear_nvidia.cu
  * @brief Linear (全连接层) 算子的 CUDA 实现 — 使用 cuBLAS
  *
- * ── 算子公式 ────────────────────────────────────────────
+ * ── 算子公式 ---
  *   out = in @ weight.T + bias
  *   in:     [M, K]  (rows × in_features)
  *   weight: [N, K]  (out_features × in_features)
  *   bias:   [N]     (out_features)    — 可选
  *   out:    [M, N]  (rows × out_features)
  *
- * ── cuBLAS 行主序适配 ──────────────────────────────────
+ * ── cuBLAS 行主序适配 ---
  *   cuBLAS 默认列主序。对于行主序数据，利用转置恒等式：
  *     out^T = weight @ in^T
  *   即 cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K,
@@ -22,7 +22,7 @@
  *     cuBLAS 拿到的是 weight^T[K,N]，需转置 → transa = CUBLAS_OP_T
  *     cuBLAS 拿到的是 in^T[K,M]，不需转置 → transb = CUBLAS_OP_N
  *
- * ── Bias 处理 ───────────────────────────────────────────
+ * ── Bias 处理 ---
  *   GEMM 后用简单的 elementwise kernel 广播加 bias
  */
 
@@ -44,7 +44,6 @@ namespace {
 //  全局 cuBLAS Handle（懒初始化，线程安全）
 // ============================================================
 // cuBLAS 的所有 API 调用都需要一个 handle 来管理内部状态（选择 GPU、流绑定等）。
-// 这里用 std::once_flag + std::call_once 确保在多线程环境下只创建一次。
 // 使用全局 static handle 而非从 Resource 传入，是因为算子调用层不直接暴露 Resource 对象。
 cublasHandle_t get_cublas_handle() {
     static cublasHandle_t handle = nullptr;
@@ -57,7 +56,6 @@ cublasHandle_t get_cublas_handle() {
     });
     return handle;
 }
-
 
 inline void checkCuda(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {

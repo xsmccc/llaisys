@@ -3,9 +3,9 @@
  * Add 算子 CUDA 实现 - 向量化版本
  * ============================================================================
  * 
- * 【算子类型】访存密集型 (Memory-Bound)
+ * 算子类型访存密集型 (Memory-Bound)
  * 
- * 【计算特点】
+ * 计算特点
  *   - 每个元素只做一次加法（1 FLOP）
  *   - 每个元素需要 2 次读 + 1 次写 = 3 次内存访问
  *   - 算术强度 = 1 FLOP / (3 × 4B) ≈ 0.083 FLOP/Byte (F32)
@@ -13,12 +13,12 @@
  *   - 平衡点 = 12T / 256G ≈ 47 FLOP/Byte
  *   - 0.083 << 47 → 典型的 Memory-Bound
  * 
- * 【优化策略】
+ * 优化策略
  *   1. 向量化访存：float4/half2/bfloat162，减少 memory transaction 数量
  *   2. 合并访存(Coalesced Access)：相邻线程访问相邻内存地址
  *   3. 使用原生向量加法指令：__hadd2 可在单指令内完成 2 个 half 加法
  * 
- * 【优化历史】
+ * 优化历史
  *   v1: 朴素标量 → v2: float4 向量化 → v3 (当前): Grid-Stride Loop + __restrict__
  *   - Grid-Stride Loop: 固定 grid 大小，线程循环处理数据，解耦并行度与数据量
  *   - __restrict__: 所有指针添加别名限定，允许编译器优化 load/store 重排
@@ -82,7 +82,7 @@ __device__ __forceinline__ llaisys::bf16_t from_cuda_bfloat16(__nv_bfloat16 b) {
 // F32 向量化 Kernel
 // ============================================================================
 /**
- * 【float4 向量化原理】
+ * float4 向量化原理
  * 
  * GPU 内存系统的最小传输单位是 32 字节（一个 "sector"）。
  * 
@@ -96,13 +96,13 @@ __device__ __forceinline__ llaisys::bf16_t from_cuda_bfloat16(__nv_bfloat16 b) {
  *   - 编译器会生成 LD.128 指令（一次 load 128 bits = 16 bytes）
  *   - Warp 32 线程 × 16B = 512B，但编译器会合并为更少的 transaction
  * 
- * 【关键洞察】
+ * 设计要点
  *   向量化的真正好处不是"减少指令数"，而是：
  *   1. 提高 sector 利用率（减少浪费的带宽）
  *   2. 更好地利用 L1/L2 cache line（64B/128B）
  *   3. 减少指令发射压力
  * 
- * 【线程映射 (Grid-Stride)】
+ * 线程映射 (Grid-Stride)
  *   固定 grid = SM数×8 个 block，每个 block 256 线程
  *   stride = 总线程数，每个线程通过 i += stride 循环处理多组 float4
  *   例：总线程 69632，数据 100M float4
@@ -130,7 +130,7 @@ __global__ void add_kernel_f32_vec(
 
         // LD.128：一次从 HBM 搬运 16 字节
         // reinterpret_cast 告诉编译器生成宽 load 指令
-        // 【对齐】cudaMalloc 保证至少 256B 对齐，base=0 安全
+        // 对齐cudaMalloc 保证至少 256B 对齐，base=0 安全
         float4 a4 = *reinterpret_cast<const float4 *>(a + base);
         float4 b4 = *reinterpret_cast<const float4 *>(b + base);
 
@@ -159,7 +159,7 @@ __global__ void add_kernel_f32_vec(
 // F16 向量化 Kernel —— 使用 float4 宽搬运 (LD.128)
 // ============================================================================
 /**
- * 【优化思路：搬运和计算分离】
+ * 优化思路：搬运和计算分离
  * 
  * 之前版本：half2 搬运 + half2 计算
  *   → 每线程 LD.32 (4B) = 2 个 half → 指令多、load 窄
@@ -168,11 +168,11 @@ __global__ void add_kernel_f32_vec(
  *   → 每线程 LD.128 (16B) = 8 个 half → 指令少、load 宽
  *   → 然后把 float4 拆成 4 个 half2 做 __hadd2
  * 
- * 【内存布局】
+ * 内存布局
  *   float4 (16B) = [half_0 half_1] [half_2 half_3] [half_4 half_5] [half_6 half_7]
  *                   ─── half2_0 ──  ─── half2_1 ──  ─── half2_2 ──  ─── half2_3 ──
  * 
- * 【预期效果】
+ * 预期效果
  *   - load/store 指令数减少 4 倍
  *   - DRAM Throughput 可能从 92% → 接近 95%
  *   - Grid Size 减小 4 倍（从 4096 → 1024）
@@ -223,7 +223,7 @@ __global__ void add_kernel_f16_vec(
 // BF16 向量化 Kernel
 // ============================================================================
 /**
- * 【BFloat16 简介】
+ * BFloat16 简介
  * 
  * BF16 是 Google Brain 提出的 16 位浮点格式：
  *   - 1 位符号 + 8 位指数 + 7 位尾数
@@ -235,11 +235,11 @@ __global__ void add_kernel_f16_vec(
  *   - 精度比 FP16 低（7 vs 10 位尾数），但对深度学习足够
  *   - FP32 ↔ BF16 转换只需截断/补零尾数，无需重新归一化
  * 
- * 【硬件支持】
+ * 硬件支持
  *   - NVIDIA Ampere (sm_80+) 开始支持原生 BF16 运算
  *   - __hadd2 对 bfloat162 类型同样有效（重载函数）
  * 
- * 【与 F16 kernel 的对称性】
+ * 与 F16 kernel 的对称性
  *   代码结构完全相同，只是类型从 half → bfloat16
  */
 __global__ void add_kernel_bf16_vec(
@@ -285,7 +285,7 @@ __global__ void add_kernel_bf16_vec(
 // Kernel 启动器
 // ============================================================================
 /**
- * 【Grid/Block 配置策略 —— Grid-Stride Loop】
+ * Grid/Block 配置策略 —— Grid-Stride Loop
  * 
  * threads = 256 是经典选择：
  *   - 256 = 8 个 warp（每 warp 32 线程）
@@ -353,7 +353,7 @@ void launch_add_kernel(std::byte *c, const std::byte *a, const std::byte *b, lla
         throw std::invalid_argument("Unsupported dtype for CUDA add");
     }
 
-    // 【Kernel 异步执行与错误检查】
+    // Kernel 异步执行与错误检查
     // CUDA kernel 是异步的：<<<>>> 立即返回，kernel 在 GPU 上排队执行
     // cudaGetLastError() 检查最近一次 kernel launch 是否有配置错误
     // 注意：这不会等待 kernel 完成，运行时错误需要 cudaDeviceSynchronize() 后才能捕获

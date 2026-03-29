@@ -2,7 +2,7 @@
  * @file embedding_nvidia.cu
  * @brief Embedding 算子的 CUDA 实现
  *
- * ── 算子特性分析 ──────────────────────────────────────────
+ * ── 算子特性分析 ---
  *   类型：纯访存密集型（Memory Bound）
  *   操作：按 index 从 weight[vocab_size, embedding_dim] 中复制整行到 out
  *   计算量：零（只有内存拷贝）
@@ -11,12 +11,12 @@
  *     - out 写入：连续（按 index 顺序依次写入）
  *     - index 读取：连续（顺序遍历）
  *
- * ── 优化策略 ────────────────────────────────────────────
+ * ── 优化策略 ---
  *   1. 每个 block 处理一个 index（一行），block 内线程协作复制该行
  *   2. 使用 float4/half2 向量化访存，减少内存事务数
  *   3. embedding_dim 通常是 128 的倍数（如 1536, 4096），天然对齐
  *
- * ── 线程映射 ────────────────────────────────────────────
+ * ── 线程映射 ---
  *   grid:  (num_indices, 1, 1)  — 每个 block 负责一个 index
  *   block: (256, 1, 1)          — block 内线程协作复制一行
  *   每线程处理 4 个 float（float4）或 8 个 half（通过 float4）

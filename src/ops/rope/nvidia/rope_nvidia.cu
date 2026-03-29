@@ -2,19 +2,19 @@
  * @file rope_nvidia.cu
  * @brief RoPE（旋转位置编码）算子的 CUDA 实现
  *
- * ── 算子公式 ────────────────────────────────────────────
+ * ── 算子公式 ---
  *   输入 x[i,h,:] = [a, b]（前后各 d/2）
  *   角度 phi_{i,j} = p_i / theta^(2j/d)
  *   输出:
  *     a'[j] = a[j] * cos(phi) - b[j] * sin(phi)
  *     b'[j] = b[j] * cos(phi) + a[j] * sin(phi)
  *
- * ── 算子特性 ────────────────────────────────────────────
+ * ── 算子特性 ---
  *   类型：计算密集型 elementwise（sin/cos 较贵）
  *   形状：[seqlen, nhead, head_dim]
  *   总元素对数：seqlen × nhead × head_dim/2
  *
- * ── 线程映射 ────────────────────────────────────────────
+ * ── 线程映射 ---
  *   将 (seqlen × nhead × head_dim/2) 展平为 1D
  *   每线程处理一对 (a[j], b[j]) 的旋转
  */
@@ -66,10 +66,7 @@ __device__ __forceinline__ T from_float(float v) {
 // ============================================================
 //  RoPE Kernel — 全 float 精度 + sincosf 优化版
 // ============================================================
-// 优化前: pow(double) + sin(double) + cos(double) → ~800 cycle/线程（FP64 = FP32 的 1/64）
-// 优化后: exp2f(float) + sincosf(float) → ~24 cycle/线程（全在 SFU 上完成）
 //
-// 精度分析:
 //   - exp2f 精度 ~1e-6 相对误差
 //   - sincosf 精度 ~1e-6 相对误差
 //   - 总误差 ~1e-5，远在 F32 测试容差 1e-4 内

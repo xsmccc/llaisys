@@ -2,7 +2,7 @@
  * @file self_attention_nvidia.cu
  * @brief Causal Self-Attention 算子的 CUDA 实现（融合 kernel）
  *
- * ── 算子公式 ────────────────────────────────────────────
+ * ── 算子公式 ---
  *   Attention(Q, K, V) = softmax(Q @ K^T * scale + causal_mask) @ V
  *
  *   Q:        [seq_len,   nhead,    head_dim]
@@ -13,22 +13,22 @@
  *   支持 GQA (Grouped Query Attention):
  *     nhead % kv_head == 0, 每 group_size = nhead/kv_head 个 Q 头共享一组 KV
  *
- * ── 融合策略 ────────────────────────────────────────────
+ * ── 融合策略 ---
  *   将整个 self-attention 融合为一个 kernel，避免中间结果来回全局内存：
  *     Phase 1: Q @ K^T — 每线程负责若干 t，逐元素点积后写入 shared memory
  *     Phase 2: Causal mask — 将 t > current_pos 的分数设为 -inf
  *     Phase 3: Safe softmax — block reduce 求 max → exp → reduce 求 sum → 归一化
  *     Phase 4: scores @ V — 线程映射到 v_head_dim，读共享内存中的 scores 加权求和
  *
- * ── 线程映射 ────────────────────────────────────────────
+ * ── 线程映射 ---
  *   grid:  (seq_len, nhead)    — 每个 block 处理一个 (query_pos, head) 组合
  *   block: (256, 1, 1)         — block 内 256 线程协作
  *
- * ── Shared Memory 布局 ──────────────────────────────────
+ * ── Shared Memory 布局 ---
  *   dynamic: scores[total_len] + warp_buf[WARPS]
  *   static:  s_max, s_sum (用于广播归约结果)
  *
- * ── 所有计算统一使用 F32 ──────────────────────────────────
+ * ── 所有计算统一使用 F32 ---
  *   F16/BF16 输入先转 float 再计算，最终转回写出
  *   这与 CPU 版本保持一致，确保数值正确性
  */
@@ -182,10 +182,10 @@ __global__ void self_attention_fused(
     }
     __syncthreads();
 
-    // ════════════════════════════════════════════════════════
+    // ---
     //  Phase 1: Q @ K^T  →  scores[t] = dot(Q[i,h,:], K[t,kv_h,:]) * scale
     //           float4 向量化读取 K（每次 128-bit = 4 floats / 8 halfs）
-    // ════════════════════════════════════════════════════════
+    // ---
     constexpr size_t ELT_PER_VEC = sizeof(float4) / sizeof(T); // F32:4, F16:8
     const size_t head_dim_vec  = head_dim / ELT_PER_VEC;       // 向量化迭代次数
     const size_t head_dim_tail = head_dim_vec * ELT_PER_VEC;   // 标量尾起始位置
@@ -215,9 +215,9 @@ __global__ void self_attention_fused(
     }
     __syncthreads();
 
-    // ════════════════════════════════════════════════════════
+    // ---
     //  Phase 2: Causal Mask  →  future tokens 设为 -inf
-    // ════════════════════════════════════════════════════════
+    // ---
     size_t current_pos = total_len - seq_len + i;
 
     for (size_t t = threadIdx.x; t < total_len; t += blockDim.x) {
@@ -227,9 +227,9 @@ __global__ void self_attention_fused(
     }
     __syncthreads();
 
-    // ════════════════════════════════════════════════════════
+    // ---
     //  Phase 3: Safe Softmax
-    // ════════════════════════════════════════════════════════
+    // ---
 
     // ── 3a: 求全局最大值 (数值稳定性) ──
     float local_max = -INFINITY;
@@ -263,10 +263,10 @@ __global__ void self_attention_fused(
     }
     __syncthreads();
 
-    // ════════════════════════════════════════════════════════
+    // ---
     //  Phase 4: scores @ V  →  输出每个 v_head_dim 元素
     //           V 读取沿 v_head_dim 方向天然 coalesced（相邻线程读相邻 dv）
-    // ════════════════════════════════════════════════════════
+    // ---
     T* out_row = attn_val + i * nhead * v_head_dim + h * v_head_dim;
     const size_t kv_v_stride = kv_head * v_head_dim;
 
@@ -280,12 +280,11 @@ __global__ void self_attention_fused(
     }
 }
 
-
 // ============================================================
 //  FlashAttention v2 Kernel — Tiled Online Softmax (优化版)
 // ============================================================
 //
-//  核心思想：将 KV 序列分成 Bc 大小的 tile，逐 tile 处理。
+//  将 KV 序列分成 Bc 大小的 tile，逐 tile 处理。
 //  维护在线统计量 m (running max) 和 l (running sum)，
 //  O_acc 保存未归一化的加权输出，最终除以 l 得到结果。
 //
@@ -322,8 +321,8 @@ __global__ void flash_attention_kernel(
     size_t v_head_dim,
     float scale
 ) {
-    const size_t i    = blockIdx.x;
-    const size_t h    = blockIdx.y;
+    const size_t i    = blockIdx.x; //query的位置
+    const size_t h    = blockIdx.y; // 注意力头的位置
     const size_t kv_h = h / (nhead / kv_head);
 
     // ── Shared Memory 布局 ──
@@ -353,14 +352,17 @@ __global__ void flash_attention_kernel(
     __syncthreads();
 
     // ── 每线程的 online softmax 状态 ──
+    // MAX_DV = ceil(v_head_dim / blockDim.x) 上界。当前 THREADS=256, head_dim<=256
+    // 若修改 THREADS 或支持更大 head_dim，需同步调整
     constexpr int MAX_DV = 4;
+    static_assert(MAX_DV >= 1, "MAX_DV must be at least 1");
     float o_acc[MAX_DV];
     for (int r = 0; r < MAX_DV; r++) o_acc[r] = 0.0f;
 
     float running_max = -INFINITY;
     float running_sum = 0.0f;
 
-    // ═══════════════ 主循环: 逐 tile 处理 KV ═══════════════
+    // --- 主循环: 逐 tile 处理 KV ---
     for (size_t tile = 0; tile < num_tiles; tile++) {
         const size_t tile_start = tile * Bc;
         const size_t tile_end   = min(tile_start + (size_t)Bc, kv_len);
@@ -452,6 +454,209 @@ __global__ void flash_attention_kernel(
     }
 }
 
+// ============================================================
+//  FlashDecoding — Split KV for higher decode parallelism
+// ============================================================
+//
+//  优化目标：Decode 阶段 (seq_len=1) 只有 nhead 个 block，
+//           GPU 利用率低。FlashDecoding 沿 KV 长度维度切分，
+//           增加 block 数量以充分利用所有 SM。
+//
+//  两个 kernel:
+//    1. flash_decoding_partial: 每个 block 处理一个 KV chunk
+//       输出 partial_O (未归一化加权 V), partial_m (局部 max), partial_l (局部 sum)
+//    2. flash_decoding_reduce: 跨 splits 合并，用 online softmax 修正
+//
+//  grid:
+//    partial: (num_splits, nhead)
+//    reduce:  (nhead,)
+
+constexpr int FD_CHUNK_SIZE = 256;  // KV positions per split block
+
+// ── Static workspace management ──
+static float* s_fd_workspace = nullptr;
+static size_t s_fd_workspace_bytes = 0;
+
+static void ensure_fd_workspace(size_t num_splits, size_t nhead, size_t v_head_dim) {
+    size_t needed = (num_splits * nhead * v_head_dim + 2 * num_splits * nhead) * sizeof(float);
+    if (needed > s_fd_workspace_bytes) {
+        if (s_fd_workspace) cudaFree(s_fd_workspace);
+        cudaMalloc(&s_fd_workspace, needed);
+        s_fd_workspace_bytes = needed;
+    }
+}
+
+void cleanup_fd_workspace() {
+    if (s_fd_workspace) {
+        cudaFree(s_fd_workspace);
+        s_fd_workspace = nullptr;
+        s_fd_workspace_bytes = 0;
+    }
+}
+
+template <typename T>
+__global__ void flash_decoding_partial_kernel(
+    float* __restrict__     partial_O,    // [num_splits, nhead, v_head_dim]
+    float* __restrict__     partial_m,    // [num_splits, nhead]
+    float* __restrict__     partial_l,    // [num_splits, nhead]
+    const T* __restrict__   q,            // [1, nhead, head_dim]
+    const T* __restrict__   k,            // [total_len, kv_head, head_dim]
+    const T* __restrict__   v,            // [total_len, kv_head, v_head_dim]
+    size_t total_len,
+    size_t nhead,
+    size_t kv_head,
+    size_t head_dim,
+    size_t v_head_dim,
+    float scale
+) {
+    const size_t split_id = blockIdx.x;
+    const size_t h        = blockIdx.y;
+    const size_t kv_h     = h / (nhead / kv_head);
+
+    const size_t kv_start = split_id * FD_CHUNK_SIZE;
+    const size_t kv_end   = min(kv_start + (size_t)FD_CHUNK_SIZE, total_len);
+    const int    kv_len   = (int)(kv_end - kv_start);
+
+    if (kv_len <= 0) {
+        if (threadIdx.x == 0) {
+            partial_m[split_id * nhead + h] = -INFINITY;
+            partial_l[split_id * nhead + h] = 0.0f;
+        }
+        for (size_t dv = threadIdx.x; dv < v_head_dim; dv += blockDim.x)
+            partial_O[(split_id * nhead + h) * v_head_dim + dv] = 0.0f;
+        return;
+    }
+
+    // Shared: scores[FD_CHUNK_SIZE] + warp_buf[WARPS] + s_q[head_dim]
+    extern __shared__ char smem_bytes[];
+    float* scores   = reinterpret_cast<float*>(smem_bytes);
+    float* warp_buf = scores + FD_CHUNK_SIZE;
+    float* s_q      = warp_buf + WARPS;
+
+    __shared__ float s_max, s_sum;
+
+    // Load Q
+    const T* q_row = q + h * head_dim;
+    for (size_t d = threadIdx.x; d < head_dim; d += blockDim.x)
+        s_q[d] = to_float(q_row[d]);
+    __syncthreads();
+
+    // Phase 1: QK^T (float4 vectorized)
+    constexpr size_t ELT_PER_VEC = sizeof(float4) / sizeof(T);
+    const size_t head_dim_vec  = head_dim / ELT_PER_VEC;
+    const size_t head_dim_tail = head_dim_vec * ELT_PER_VEC;
+    const size_t kv_stride     = kv_head * head_dim;
+
+    for (int t = threadIdx.x; t < kv_len; t += blockDim.x) {
+        const T* k_row = k + (kv_start + t) * kv_stride + kv_h * head_dim;
+        float dot = 0.0f;
+
+        const float4* k4 = reinterpret_cast<const float4*>(k_row);
+        for (size_t vi = 0; vi < head_dim_vec; vi++) {
+            float4 kv4 = k4[vi];
+            const T* ke = reinterpret_cast<const T*>(&kv4);
+            #pragma unroll
+            for (size_t e = 0; e < ELT_PER_VEC; e++)
+                dot += s_q[vi * ELT_PER_VEC + e] * to_float(ke[e]);
+        }
+        for (size_t d = head_dim_tail; d < head_dim; d++)
+            dot += s_q[d] * to_float(k_row[d]);
+
+        scores[t] = dot * scale;
+    }
+    __syncthreads();
+
+    // Phase 2: No causal mask for decode (query at end, all KV valid)
+
+    // Phase 3a: Max
+    float local_max = -INFINITY;
+    for (int t = threadIdx.x; t < kv_len; t += blockDim.x)
+        local_max = fmaxf(local_max, scores[t]);
+    local_max = block_reduce_max(local_max, warp_buf);
+    if (threadIdx.x == 0) s_max = local_max;
+    __syncthreads();
+    float max_val = s_max;
+
+    // Phase 3b: exp(score - max)
+    for (int t = threadIdx.x; t < kv_len; t += blockDim.x)
+        scores[t] = expf(scores[t] - max_val);
+    __syncthreads();
+
+    // Phase 3c: Sum
+    float local_sum = 0.0f;
+    for (int t = threadIdx.x; t < kv_len; t += blockDim.x)
+        local_sum += scores[t];
+    local_sum = block_reduce_sum(local_sum, warp_buf);
+    if (threadIdx.x == 0) s_sum = local_sum;
+    __syncthreads();
+
+    // Phase 4: Unnormalized scores @ V
+    const size_t kv_v_stride = kv_head * v_head_dim;
+    float* out_partial = partial_O + (split_id * nhead + h) * v_head_dim;
+
+    for (size_t dv = threadIdx.x; dv < v_head_dim; dv += blockDim.x) {
+        float val = 0.0f;
+        for (int t = 0; t < kv_len; t++) {
+            const T* v_row = v + (kv_start + t) * kv_v_stride + kv_h * v_head_dim;
+            val += scores[t] * to_float(v_row[dv]);
+        }
+        out_partial[dv] = val;
+    }
+
+    // Store local max and sum
+    if (threadIdx.x == 0) {
+        partial_m[split_id * nhead + h] = max_val;
+        partial_l[split_id * nhead + h] = s_sum;
+    }
+}
+
+template <typename T>
+__global__ void flash_decoding_reduce_kernel(
+    T* __restrict__           attn_val,    // [1, nhead, v_head_dim]
+    const float* __restrict__ partial_O,   // [num_splits, nhead, v_head_dim]
+    const float* __restrict__ partial_m,   // [num_splits, nhead]
+    const float* __restrict__ partial_l,   // [num_splits, nhead]
+    size_t num_splits,
+    size_t nhead,
+    size_t v_head_dim
+) {
+    const size_t h = blockIdx.x;
+
+    extern __shared__ char smem_bytes[];
+    float* warp_buf = reinterpret_cast<float*>(smem_bytes);
+
+    __shared__ float s_global_max;
+    __shared__ float s_global_sum;
+
+    // Global max across splits
+    float local_max = -INFINITY;
+    for (size_t s = threadIdx.x; s < num_splits; s += blockDim.x)
+        local_max = fmaxf(local_max, partial_m[s * nhead + h]);
+    local_max = block_reduce_max(local_max, warp_buf);
+    if (threadIdx.x == 0) s_global_max = local_max;
+    __syncthreads();
+    float global_max = s_global_max;
+
+    // Rescaled sum
+    float local_sum = 0.0f;
+    for (size_t s = threadIdx.x; s < num_splits; s += blockDim.x)
+        local_sum += expf(partial_m[s * nhead + h] - global_max) * partial_l[s * nhead + h];
+    local_sum = block_reduce_sum(local_sum, warp_buf);
+    if (threadIdx.x == 0) s_global_sum = local_sum;
+    __syncthreads();
+    float inv_sum = (s_global_sum > 0.0f) ? (1.0f / s_global_sum) : 0.0f;
+
+    // Merge partial_O with rescaling
+    T* out = attn_val + h * v_head_dim;
+    for (size_t dv = threadIdx.x; dv < v_head_dim; dv += blockDim.x) {
+        float val = 0.0f;
+        for (size_t s = 0; s < num_splits; s++) {
+            float rescale = expf(partial_m[s * nhead + h] - global_max);
+            val += rescale * partial_O[(s * nhead + h) * v_head_dim + dv];
+        }
+        out[dv] = from_float<T>(val * inv_sum);
+    }
+}
 
 } // anonymous namespace
 
@@ -474,13 +679,88 @@ void self_attention(
     size_t v_head_dim,
     float scale
 ) {
-    dim3 grid(static_cast<unsigned>(seq_len), static_cast<unsigned>(nhead));
     constexpr int threads = THREADS;
+    constexpr int MAX_DV = 4;
 
-    // ── 策略选择 ──
-    // FlashAttention: 分 tile 处理 KV，O(Bc) 共享内存，支持任意长序列
-    // Naive Fused:    scores[total_len] 全存 shared memory，短序列更快
-    // 阈值: shared memory 48KB，scores+warp_buf+Q 能装下则用 naive
+    // 安全检查: v_head_dim / threads 必须 <= MAX_DV, 否则 o_acc 越界
+    if ((v_head_dim + threads - 1) / threads > MAX_DV) {
+        throw std::runtime_error(
+            "self_attention: v_head_dim / THREADS > MAX_DV (" +
+            std::to_string(v_head_dim) + "/" + std::to_string(threads) +
+            " > " + std::to_string(MAX_DV) + "). Increase MAX_DV.");
+    }
+
+    // ---
+    //  FlashDecoding: decode (seq_len=1) + long enough KV
+    // ---
+    if (seq_len == 1 && total_len > (size_t)FD_CHUNK_SIZE) {
+        size_t num_splits = (total_len + FD_CHUNK_SIZE - 1) / FD_CHUNK_SIZE;
+        ensure_fd_workspace(num_splits, nhead, v_head_dim);
+
+        float* partial_O = s_fd_workspace;
+        float* partial_m = s_fd_workspace + num_splits * nhead * v_head_dim;
+        float* partial_l = partial_m + num_splits * nhead;
+
+        dim3 partial_grid(static_cast<unsigned>(num_splits), static_cast<unsigned>(nhead));
+        size_t partial_smem = (FD_CHUNK_SIZE + WARPS + head_dim) * sizeof(float);
+
+        switch (dtype) {
+        case LLAISYS_DTYPE_F32:
+            flash_decoding_partial_kernel<float><<<partial_grid, threads, partial_smem>>>(
+                partial_O, partial_m, partial_l,
+                reinterpret_cast<const float*>(q), reinterpret_cast<const float*>(k),
+                reinterpret_cast<const float*>(v),
+                total_len, nhead, kv_head, head_dim, v_head_dim, scale);
+            break;
+        case LLAISYS_DTYPE_F16:
+            flash_decoding_partial_kernel<__half><<<partial_grid, threads, partial_smem>>>(
+                partial_O, partial_m, partial_l,
+                reinterpret_cast<const __half*>(q), reinterpret_cast<const __half*>(k),
+                reinterpret_cast<const __half*>(v),
+                total_len, nhead, kv_head, head_dim, v_head_dim, scale);
+            break;
+        case LLAISYS_DTYPE_BF16:
+            flash_decoding_partial_kernel<__nv_bfloat16><<<partial_grid, threads, partial_smem>>>(
+                partial_O, partial_m, partial_l,
+                reinterpret_cast<const __nv_bfloat16*>(q), reinterpret_cast<const __nv_bfloat16*>(k),
+                reinterpret_cast<const __nv_bfloat16*>(v),
+                total_len, nhead, kv_head, head_dim, v_head_dim, scale);
+            break;
+        default: EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
+        }
+        checkCuda(cudaGetLastError(), "flash_decoding_partial_kernel launch failed");
+
+        dim3 reduce_grid(static_cast<unsigned>(nhead));
+        size_t reduce_smem = WARPS * sizeof(float);
+
+        switch (dtype) {
+        case LLAISYS_DTYPE_F32:
+            flash_decoding_reduce_kernel<float><<<reduce_grid, threads, reduce_smem>>>(
+                reinterpret_cast<float*>(attn_val_ptr), partial_O, partial_m, partial_l,
+                num_splits, nhead, v_head_dim);
+            break;
+        case LLAISYS_DTYPE_F16:
+            flash_decoding_reduce_kernel<__half><<<reduce_grid, threads, reduce_smem>>>(
+                reinterpret_cast<__half*>(attn_val_ptr), partial_O, partial_m, partial_l,
+                num_splits, nhead, v_head_dim);
+            break;
+        case LLAISYS_DTYPE_BF16:
+            flash_decoding_reduce_kernel<__nv_bfloat16><<<reduce_grid, threads, reduce_smem>>>(
+                reinterpret_cast<__nv_bfloat16*>(attn_val_ptr), partial_O, partial_m, partial_l,
+                num_splits, nhead, v_head_dim);
+            break;
+        default: EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
+        }
+        checkCuda(cudaGetLastError(), "flash_decoding_reduce_kernel launch failed");
+        return;
+    }
+
+    // ---
+    //  Original paths: Naive Fused / FlashAttention v2
+    // ---
+    dim3 grid(static_cast<unsigned>(seq_len), static_cast<unsigned>(nhead));
+
+    // 策略选择: scores[total_len] 能装进 48KB smem → naive, 否则 flash
     size_t naive_smem = (total_len + WARPS + head_dim) * sizeof(float);
     constexpr size_t SMEM_LIMIT = 48 * 1024;  // 48KB
 
@@ -550,6 +830,10 @@ void self_attention(
         }
         checkCuda(cudaGetLastError(), "self_attention_fused kernel launch failed");
     }
+}
+
+void cleanup_self_attention_workspace() {
+    cleanup_fd_workspace();
 }
 
 } // namespace llaisys::ops::nvidia

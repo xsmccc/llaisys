@@ -11,17 +11,20 @@
 #ifdef ENABLE_METAX_API
 #include "metax/linear_quantized_metax.hpp"
 #endif
-#ifdef ENABLE_TIANSHU_API
-#include "tianshu/linear_quantized_tianshu.hpp"
-#endif
 
 /**
  * @file op.cpp
- * @brief W8A32 量化 Linear 算子 — 调度入口
+ * @brief W8A16 量化 Linear 算子 — 调度入口
+ *
+ * 支持 FP16 和 FP32 activation:
+ *   - W8A16: in(F16) -> dequant(INT8->F16) -> TC GEMM -> out(F16)
+ *   - 兼容 FP32: in(F32) -> convert(F16) -> TC GEMM -> out(F32)
+ *   - 混合: in(F16) -> TC GEMM -> out(F32) (如 lm_head 需要 F32 logits)
  *
  * 约束:
- *   - out / in / scales / bias 必须为 F32
  *   - weight 必须为 I8
+ *   - in/out 必须为 F32 或 F16
+ *   - scales 必须为 F32
  *   - 所有张量必须在同一设备上且内存连续
  */
 namespace llaisys::ops {
@@ -41,13 +44,13 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight,
     ASSERT(out->numel() / out_features == rows,
            "LinearQuantized: input/output rows mismatch");
 
-    // ── 类型检查 ──
+    // ── 类型检查 (W8A16: 支持 F16 和 F32 activation) ──
     ASSERT(weight->dtype() == LLAISYS_DTYPE_I8,
            "LinearQuantized: weight must be INT8");
-    ASSERT(in->dtype() == LLAISYS_DTYPE_F32,
-           "LinearQuantized: input must be F32");
-    ASSERT(out->dtype() == LLAISYS_DTYPE_F32,
-           "LinearQuantized: output must be F32");
+    ASSERT(in->dtype() == LLAISYS_DTYPE_F32 || in->dtype() == LLAISYS_DTYPE_F16,
+           "LinearQuantized: input must be F32 or F16");
+    ASSERT(out->dtype() == LLAISYS_DTYPE_F32 || out->dtype() == LLAISYS_DTYPE_F16,
+           "LinearQuantized: output must be F32 or F16");
     ASSERT(scales->dtype() == LLAISYS_DTYPE_F32,
            "LinearQuantized: scales must be F32");
     ASSERT(scales->numel() == out_features,
@@ -55,9 +58,11 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight,
 
     // ── Bias 检查 ──
     bool has_bias = (bias != nullptr) && (bias->numel() > 0);
+    llaisysDataType_t bias_dtype = LLAISYS_DTYPE_F32;
     if (has_bias) {
-        ASSERT(bias->dtype() == LLAISYS_DTYPE_F32,
-               "LinearQuantized: bias must be F32");
+        ASSERT(bias->dtype() == LLAISYS_DTYPE_F32 || bias->dtype() == LLAISYS_DTYPE_F16,
+               "LinearQuantized: bias must be F32 or F16");
+        bias_dtype = bias->dtype();
         ASSERT(bias->numel() == out_features,
                "LinearQuantized: bias shape mismatch");
         CHECK_SAME_DEVICE(out, in, weight, scales, bias);
@@ -100,25 +105,15 @@ void linear_quantized(tensor_t out, tensor_t in, tensor_t weight,
                 has_bias ? bias->data() : nullptr,
                 in_features,
                 out_features,
-                rows
+                rows,
+                in->dtype(),
+                out->dtype(),
+                bias_dtype
             );
     #endif
     #ifdef ENABLE_METAX_API
         case LLAISYS_DEVICE_METAX:
             return metax::linear_quantized(
-                out->data(),
-                in->data(),
-                weight->data(),
-                scales->data(),
-                has_bias ? bias->data() : nullptr,
-                in_features,
-                out_features,
-                rows
-            );
-    #endif
-    #ifdef ENABLE_TIANSHU_API
-        case LLAISYS_DEVICE_TIANSHU:
-            return tianshu::linear_quantized(
                 out->data(),
                 in->data(),
                 weight->data(),
@@ -154,13 +149,13 @@ void linear_quantized_int4(tensor_t out, tensor_t in, tensor_t weight_packed,
     ASSERT(out->numel() / N == rows,
            "LinearQuantizedINT4: input/output rows mismatch");
 
-    // ── 类型检查 ──
+    // ── 类型检查 (W4A16: 支持 F16 和 F32 activation) ──
     ASSERT(weight_packed->dtype() == LLAISYS_DTYPE_U8,
            "LinearQuantizedINT4: weight must be U8 (packed INT4)");
-    ASSERT(in->dtype() == LLAISYS_DTYPE_F32,
-           "LinearQuantizedINT4: input must be F32");
-    ASSERT(out->dtype() == LLAISYS_DTYPE_F32,
-           "LinearQuantizedINT4: output must be F32");
+    ASSERT(in->dtype() == LLAISYS_DTYPE_F32 || in->dtype() == LLAISYS_DTYPE_F16,
+           "LinearQuantizedINT4: input must be F32 or F16");
+    ASSERT(out->dtype() == LLAISYS_DTYPE_F32 || out->dtype() == LLAISYS_DTYPE_F16,
+           "LinearQuantizedINT4: output must be F32 or F16");
     ASSERT(scales->dtype() == LLAISYS_DTYPE_F16,
            "LinearQuantizedINT4: scales must be F16");
     ASSERT(scales->shape()[0] == N,
@@ -170,9 +165,11 @@ void linear_quantized_int4(tensor_t out, tensor_t in, tensor_t weight_packed,
 
     // ── Bias 检查 ──
     bool has_bias = (bias != nullptr) && (bias->numel() > 0);
+    llaisysDataType_t bias_dtype = LLAISYS_DTYPE_F32;
     if (has_bias) {
-        ASSERT(bias->dtype() == LLAISYS_DTYPE_F32,
-               "LinearQuantizedINT4: bias must be F32");
+        ASSERT(bias->dtype() == LLAISYS_DTYPE_F32 || bias->dtype() == LLAISYS_DTYPE_F16,
+               "LinearQuantizedINT4: bias must be F32 or F16");
+        bias_dtype = bias->dtype();
         ASSERT(bias->numel() == N,
                "LinearQuantizedINT4: bias shape mismatch");
         CHECK_SAME_DEVICE(out, in, weight_packed, scales, bias);
@@ -202,7 +199,10 @@ void linear_quantized_int4(tensor_t out, tensor_t in, tensor_t weight_packed,
                 N,              // out_features
                 rows,           // M
                 num_groups,
-                group_size
+                group_size,
+                in->dtype(),
+                out->dtype(),
+                bias_dtype
             );
     #endif
         default:
