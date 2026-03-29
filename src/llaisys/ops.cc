@@ -16,6 +16,8 @@
 #include "../ops/rope/op.hpp"
 #include "../ops/self_attention/op.hpp"
 #include "../ops/swiglu/op.hpp"
+#include "../ops/fused_add_rmsnorm/op.hpp"
+#include "../ops/self_attention/nvidia/self_attention_nvidia.hpp"
 
 //保持函数名不动  方便python的ctypes库寻找
 __C {
@@ -51,9 +53,17 @@ __C {
     void llaisysSwiGLU(llaisysTensor_t out, llaisysTensor_t gate, llaisysTensor_t up) {
         llaisys::ops::swiglu(out->tensor, gate->tensor, up->tensor);
     }
+    void llaisysFusedAddRmsNorm(llaisysTensor_t out, llaisysTensor_t residual_out, llaisysTensor_t a, llaisysTensor_t b, llaisysTensor_t weight, float eps) {
+        llaisys::ops::fused_add_rmsnorm(out->tensor, residual_out->tensor, a->tensor, b->tensor, weight->tensor, eps);
+    }
     void llaisysCleanupQuantizedWeightCache(void) {
 #ifdef ENABLE_NVIDIA_API
         ::llaisys::ops::nvidia::cleanup_quantized_weight_cache();
+#endif
+    }
+    void llaisysCleanupSelfAttentionWorkspace(void) {
+#ifdef ENABLE_NVIDIA_API
+        ::llaisys::ops::nvidia::cleanup_self_attention_workspace();
 #endif
     }
 }

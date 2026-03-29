@@ -59,6 +59,13 @@ class Ops:
         )
 
     @staticmethod
+    def fused_add_rms_norm(out: Tensor, residual_out: Tensor, a: Tensor, b: Tensor, weight: Tensor, eps: float):
+        LIB_LLAISYS.llaisysFusedAddRmsNorm(
+            out.lib_tensor(), residual_out.lib_tensor(),
+            a.lib_tensor(), b.lib_tensor(), weight.lib_tensor(), c_float(eps)
+        )
+
+    @staticmethod
     def swiglu(out: Tensor, gate: Tensor, up: Tensor):
         LIB_LLAISYS.llaisysSwiGLU(out.lib_tensor(), gate.lib_tensor(), up.lib_tensor())
 
