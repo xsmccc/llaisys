@@ -1,5 +1,5 @@
-add_rules("mode.debug", "mode.release") -- 添加调试/发布构建模式
-set_encodings("utf-8") -- 设置源码/输出编码为 UTF-8
+add_rules("mode.debug", "mode.release")
+set_encodings("utf-8")
 
 local function get_metax_sdk_paths()
     local maca_path = os.getenv("MACA_PATH") or os.getenv("MACA_HOME") or "/opt/maca"
@@ -15,240 +15,184 @@ local function get_metax_sdk_paths()
     return maca_path, libdir
 end
 
-add_includedirs("include") -- 添加头文件全局搜索路径
+add_includedirs("include")
 
--- CPU --
-includes("xmake/cpu.lua") -- 引入 CPU 相关构建配置
+-- CPU
+includes("xmake/cpu.lua")
 
--- NVIDIA --
-option("nv-gpu") -- 定义是否启用 NVIDIA GPU 的构建开关
-    set_default(false) -- 默认关闭 GPU 支持
-    set_showmenu(true) -- 允许在命令行菜单中显示该选项
-    set_description("Whether to compile implementations for Nvidia GPU") -- 选项说明
-option_end() -- 结束选项定义
+-- NVIDIA
+option("nv-gpu")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Whether to compile implementations for Nvidia GPU")
+option_end()
 
-option("cuda-arch") -- CUDA GPU 架构版本
-    set_default("sm_89") -- 默认 sm_89 (RTX 40 系列)，A100 用 sm_80，V100 用 sm_70
+option("cuda-arch")
+    set_default("sm_89")
     set_showmenu(true)
     set_description("CUDA GPU architecture (e.g. sm_70, sm_80, sm_89)")
 option_end()
 
-if has_config("nv-gpu") then -- 如果启用 nv-gpu 选项
-    add_defines("ENABLE_NVIDIA_API") -- 添加宏定义以开启 NVIDIA API
-    includes("xmake/nvidia.lua") -- 引入 NVIDIA 相关构建配置
-end -- 结束条件判断
+if has_config("nv-gpu") then
+    add_defines("ENABLE_NVIDIA_API")
+    includes("xmake/nvidia.lua")
+end
 
--- MetaX MACA (沐曦 C500) --
-option("metax-gpu") -- 定义是否启用沐曦 GPU 的构建开关
-    set_default(false) -- 默认关闭 MACA 支持
-    set_showmenu(true) -- 允许在命令行菜单中显示该选项
-    set_description("Whether to compile implementations for MetaX GPU (MACA)") -- 选项说明
-option_end() -- 结束选项定义
+-- MetaX MACA
+option("metax-gpu")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Whether to compile implementations for MetaX GPU (MACA)")
+option_end()
 
-option("maca-arch") -- MACA GPU 架构版本
-    set_default("mp_22") -- 默认 mp_22 (C500 系列)
+option("maca-arch")
+    set_default("mp_22")
     set_showmenu(true)
     set_description("MACA GPU architecture (e.g. mp_21, mp_22)")
 option_end()
 
-if has_config("metax-gpu") then -- 如果启用 metax-gpu 选项
-    add_defines("ENABLE_METAX_API") -- 添加宏定义以开启 MetaX MACA API
-    includes("xmake/metax.lua") -- 引入 MetaX 相关构建配置
-end -- 结束条件判断
-
--- Tianshu TOPSRIDER (天数智芯 BI-150) --
-option("tianshu-gpu") -- 定义是否启用天数智芯 GPU 的构建开关
-    set_default(false) -- 默认关闭 TOPSRIDER 支持
-    set_showmenu(true) -- 允许在命令行菜单中显示该选项
-    set_description("Whether to compile implementations for Tianshu GPU (TOPSRIDER)") -- 选项说明
-option_end() -- 结束选项定义
-
-option("tops-arch") -- TOPSRIDER GPU 架构版本
-    set_default("gcu300") -- 默认 gcu300 (BI-150 系列)
-    set_showmenu(true)
-    set_description("TOPSRIDER GPU architecture (e.g. gcu210, gcu300)")
-option_end()
-
-if has_config("tianshu-gpu") then -- 如果启用 tianshu-gpu 选项
-    add_defines("ENABLE_TIANSHU_API") -- 添加宏定义以开启 Tianshu TOPSRIDER API
-    includes("xmake/tianshu.lua") -- 引入 Tianshu 相关构建配置
-end -- 结束条件判断
-
-target("llaisys-utils") -- 定义工具库目标
-    set_kind("static") -- 生成静态库
-
-    set_languages("cxx17") -- 使用 C++17 标准
-    set_warnings("all", "error") -- 警告全开并视为错误
-    if not is_plat("windows") then -- 非 Windows 平台
-        add_cxflags("-fPIC", "-Wno-unknown-pragmas") -- 位置无关代码与忽略未知 pragma
-    end
-
-    add_files("src/utils/*.cpp") -- 添加 utils 源文件
-
-    on_install(function (target) end) -- 安装阶段占位
-target_end() -- 结束目标定义
+if has_config("metax-gpu") then
+    add_defines("ENABLE_METAX_API")
+    includes("xmake/metax.lua")
+end
 
 
-target("llaisys-device") -- 定义设备层静态库
-    set_kind("static") -- 生成静态库
-    add_deps("llaisys-utils") -- 依赖工具库
-    add_deps("llaisys-device-cpu") -- 依赖 CPU 设备实现
-    
-    -- Note: llaisys-device-nvidia is not added here to avoid duplicate compilation
-    -- CUDA files will be directly compiled into the shared library
-
-    set_languages("cxx17") -- 使用 C++17 标准
-    set_warnings("all", "error") -- 警告全开并视为错误
-    if not is_plat("windows") then -- 非 Windows 平台
-        add_cxflags("-fPIC", "-Wno-unknown-pragmas") -- 位置无关代码与忽略未知 pragma
-    end
-
-    add_files("src/device/*.cpp") -- 添加设备通用源码
-
-    on_install(function (target) end) -- 安装阶段占位
-target_end() -- 结束目标定义
-
-target("llaisys-core") -- 定义核心层静态库
-    set_kind("static") -- 生成静态库
-    add_deps("llaisys-utils") -- 依赖工具库
-    add_deps("llaisys-device") -- 依赖设备层
-
-    set_languages("cxx17") -- 使用 C++17 标准
-    set_warnings("all", "error") -- 警告全开并视为错误
-    if not is_plat("windows") then -- 非 Windows 平台
-        add_cxflags("-fPIC", "-Wno-unknown-pragmas") -- 位置无关代码与忽略未知 pragma
-    end
-
-    add_files("src/core/*/*.cpp") -- 添加 core 源码
-
-    on_install(function (target) end) -- 安装阶段占位
-target_end() -- 结束目标定义
-
-target("llaisys-tensor") -- 定义 Tensor 静态库
-    set_kind("static") -- 生成静态库
-    add_deps("llaisys-core") -- 依赖核心层
-
-    set_languages("cxx17") -- 使用 C++17 标准
-    set_warnings("all", "error") -- 警告全开并视为错误
-    if not is_plat("windows") then -- 非 Windows 平台
-        add_cxflags("-fPIC", "-Wno-unknown-pragmas") -- 位置无关代码与忽略未知 pragma
-    end
-
-    add_files("src/tensor/*.cpp") -- 添加 Tensor 源码
-
-    on_install(function (target) end) -- 安装阶段占位
-target_end() -- 结束目标定义
-
-target("llaisys-ops") -- 定义算子层静态库
-    set_kind("static") -- 生成静态库
-    add_deps("llaisys-ops-cpu") -- 依赖 CPU 算子实现
-    
-    if has_config("nv-gpu") then -- 若启用 GPU
-        add_deps("llaisys-ops-nvidia") -- 依赖 NVIDIA 算子实现
-    end
-
-    if has_config("metax-gpu") then -- 若启用沐曦 GPU
-        add_deps("llaisys-ops-metax") -- 依赖 MetaX 算子实现
-    end
-
-    if has_config("tianshu-gpu") then -- 若启用天数智芯 GPU
-        add_deps("llaisys-ops-tianshu") -- 依赖 Tianshu 算子实现
-    end
-
-    set_languages("cxx17") -- 使用 C++17 标准
-    set_warnings("all", "error") -- 警告全开并视为错误
-    if not is_plat("windows") then -- 非 Windows 平台
-        add_cxflags("-fPIC", "-Wno-unknown-pragmas") -- 位置无关代码与忽略未知 pragma
-    end
-    
-    add_files("src/ops/*/*.cpp") -- 添加算子源码
-
-    on_install(function (target) end) -- 安装阶段占位
-target_end() -- 结束目标定义
-
-target("llaisys") -- 定义最终共享库目标
-    set_kind("shared") -- 生成共享库
-    add_deps("llaisys-utils") -- 依赖工具库
-    add_deps("llaisys-core") -- 依赖核心层
-    add_deps("llaisys-tensor") -- 依赖 Tensor 层
-    add_deps("llaisys-ops") -- 依赖算子层
-
-    set_languages("cxx17") -- 使用 C++17 标准
-    set_warnings("all", "error") -- 警告全开并视为错误
-    add_files("src/llaisys/*.cc") -- 添加对外接口实现
-    add_files("src/models/qwen2/*.cpp") -- 添加 Qwen2 模型实现
-    add_files("src/models/llama3/*.cpp") -- 添加 LLaMA3 模型实现
-    add_files("src/device/*.cpp") -- 添加设备抽象层通用实现
-    set_installdir(".") -- 安装目录为当前目录
-    
-    -- 添加 OpenMP 和 OpenBLAS 链接（共享库需要）
+target("llaisys-utils")
+    set_kind("static")
+    set_languages("cxx17")
+    set_warnings("all", "error")
     if not is_plat("windows") then
-        add_ldflags("-fopenmp") -- 链接 OpenMP
-        add_syslinks("gomp") -- 显式链接 GNU OpenMP 库
+        add_cxflags("-fPIC", "-Wno-unknown-pragmas")
     end
-    add_links("openblas", "pthread") -- 链接 OpenBLAS 和 pthread
+    add_files("src/utils/*.cpp")
+    on_install(function (target) end)
+target_end()
 
-    -- Add CUDA support if enabled
-    -- 检查是否启用了CUDA支持
-    if has_config("nv-gpu") then -- 若启用 GPU
-        add_languages("cuda") -- 启用 CUDA 语言
-        -- 禁用 RDC（relocatable device code）减少额外显存占用
+
+target("llaisys-device")
+    set_kind("static")
+    add_deps("llaisys-utils")
+    add_deps("llaisys-device-cpu")
+    
+    -- CUDA files will be directly compiled into the shared library
+    -- to avoid duplicate compilation
+
+    set_languages("cxx17")
+    set_warnings("all", "error")
+    if not is_plat("windows") then
+        add_cxflags("-fPIC", "-Wno-unknown-pragmas")
+    end
+    add_files("src/device/*.cpp")
+    on_install(function (target) end)
+target_end()
+
+target("llaisys-core")
+    set_kind("static")
+    add_deps("llaisys-utils")
+    add_deps("llaisys-device")
+    set_languages("cxx17")
+    set_warnings("all", "error")
+    if not is_plat("windows") then
+        add_cxflags("-fPIC", "-Wno-unknown-pragmas")
+    end
+    add_files("src/core/*/*.cpp")
+    on_install(function (target) end)
+target_end()
+
+target("llaisys-tensor")
+    set_kind("static")
+    add_deps("llaisys-core")
+    set_languages("cxx17")
+    set_warnings("all", "error")
+    if not is_plat("windows") then
+        add_cxflags("-fPIC", "-Wno-unknown-pragmas")
+    end
+    add_files("src/tensor/*.cpp")
+    on_install(function (target) end)
+target_end()
+
+target("llaisys-ops")
+    set_kind("static")
+    add_deps("llaisys-ops-cpu")
+    
+    if has_config("nv-gpu") then
+        add_deps("llaisys-ops-nvidia")
+    end
+    if has_config("metax-gpu") then
+        add_deps("llaisys-ops-metax")
+    end
+
+
+    set_languages("cxx17")
+    set_warnings("all", "error")
+    if not is_plat("windows") then
+        add_cxflags("-fPIC", "-Wno-unknown-pragmas")
+    end
+    add_files("src/ops/*/*.cpp")
+    on_install(function (target) end)
+target_end()
+
+target("llaisys")
+    set_kind("shared")
+    add_deps("llaisys-utils")
+    add_deps("llaisys-core")
+    add_deps("llaisys-tensor")
+    add_deps("llaisys-ops")
+
+    set_languages("cxx17")
+    set_warnings("all", "error")
+    add_files("src/llaisys/*.cc")
+    add_files("src/models/qwen2/*.cpp")
+    add_files("src/models/llama3/*.cpp")
+    add_files("src/device/*.cpp")
+    set_installdir(".")
+    
+    if not is_plat("windows") then
+        add_ldflags("-fopenmp")
+        add_syslinks("gomp")
+    end
+    add_links("openblas", "pthread")
+
+    -- NVIDIA CUDA
+    if has_config("nv-gpu") then
+        add_languages("cuda")
         set_values("cuda.rdc", false)
         set_policy("build.cuda.devlink", false)
-        add_files("src/device/nvidia/*.cu") -- 添加 NVIDIA CUDA 源码
-        -- 使用可配置的 GPU 架构（通过 xmake f --cuda-arch=sm_XX 设置）
+        add_files("src/device/nvidia/*.cu")
         local arch = get_config("cuda-arch") or "sm_89"
-        add_cuflags("-arch=" .. arch, "-Xcompiler -fPIC", {tools = "nvcc"}) -- 设置架构与 PIC
-        -- 自动检测 CUDA 安装路径
+        add_cuflags("-arch=" .. arch, "-Xcompiler -fPIC", {tools = "nvcc"})
         local cuda_path = os.getenv("CUDA_PATH") or os.getenv("CUDA_HOME") or "/usr/local/cuda"
-        add_linkdirs(cuda_path .. "/lib64")  -- CUDA 库路径
-        add_links("cudart", "cublas", "cublasLt") -- 连接 libcudart.so (CUDA Runtime) + cuBLAS
-        add_rpathdirs(cuda_path .. "/lib64") -- 运行时库查找路径
+        add_linkdirs(cuda_path .. "/lib64")
+        add_links("cudart", "cublas", "cublasLt")
+        add_rpathdirs(cuda_path .. "/lib64")
     end
 
-    -- Add MetaX MACA support if enabled
-    -- 检查是否启用了沐曦 MetaX MACA 支持
-    if has_config("metax-gpu") then -- 若启用 MACA
-        add_rules("mxcc") -- 使用 mxcc 编译规则
-        add_files("src/device/metax/*.cu") -- 添加 MetaX 设备源码
-        add_cxflags("-fPIC") -- 位置无关代码
-        -- 自动检测 MACA 安装路径
+    -- MetaX MACA
+    if has_config("metax-gpu") then
+        add_rules("mxcc")
+        add_files("src/device/metax/*.cu")
+        add_cxflags("-fPIC")
         local maca_path, maca_libdir = get_metax_sdk_paths()
         add_includedirs(path.join(maca_path, "include"))
-        add_linkdirs(maca_libdir)  -- MACA 库路径
-        add_links("macart", "macablas") -- 链接 libmacart.so (MACA Runtime) + macaBLAS
-        add_rpathdirs(maca_libdir) -- 运行时库查找路径
+        add_linkdirs(maca_libdir)
+        add_links("macart", "macablas")
+        add_rpathdirs(maca_libdir)
     end
 
-    -- Add Tianshu TOPSRIDER support if enabled
-    -- 检查是否启用了天数智芯 TOPSRIDER 支持
-    if has_config("tianshu-gpu") then -- 若启用 TOPSRIDER
-        add_rules("topscc") -- 使用 topscc 编译规则
-        add_files("src/device/tianshu/*.cu") -- 添加 Tianshu 设备源码
-        add_cxflags("-fPIC") -- 位置无关代码
-        -- 自动检测 TOPSRIDER 安装路径
-        local tops_home = os.getenv("TOPS_HOME") or "/opt/tops"
-        add_linkdirs(tops_home .. "/lib")  -- TOPSRIDER 库路径
-        add_links("topsrt", "topsblas") -- 链接 libtopsrt.so (TOPS Runtime) + topsBLAS
-        add_rpathdirs(tops_home .. "/lib") -- 运行时库查找路径
-    end
 
-    if not has_config("nv-gpu") and not has_config("metax-gpu") and not has_config("tianshu-gpu") then
-        -- Only CPU device when CUDA is not enabled
-        add_deps("llaisys-device") -- 仅依赖 CPU 设备实现
+    if not has_config("nv-gpu") and not has_config("metax-gpu") then
+        add_deps("llaisys-device")
     end
     
-    -- Always add CPU device files
-    add_files("src/device/cpu/*.cpp") -- 始终编译 CPU 设备源码
+    add_files("src/device/cpu/*.cpp")
 
-    after_install(function (target) -- 安装后执行
-        -- copy shared library to python package
-        print("Copying llaisys to python/llaisys/libllaisys/ ..") -- 打印提示
-        if is_plat("windows") then -- Windows 平台
-            os.cp("bin/*.dll", "python/llaisys/libllaisys/") -- 复制 DLL
+    after_install(function (target)
+        print("Copying llaisys to python/llaisys/libllaisys/ ..")
+        if is_plat("windows") then
+            os.cp("bin/*.dll", "python/llaisys/libllaisys/")
         end
-        if is_plat("linux") then -- Linux 平台
-            os.cp("lib/*.so", "python/llaisys/libllaisys/") -- 复制 SO
+        if is_plat("linux") then
+            os.cp("lib/*.so", "python/llaisys/libllaisys/")
         end
-    end) -- 结束安装后操作
-target_end() -- 结束目标定义
+    end)
+target_end()
