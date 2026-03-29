@@ -20,6 +20,10 @@ struct Qwen2Config {
     int64_t end_token_id;
     llaisysDeviceType_t device_type = LLAISYS_DEVICE_CPU; // 推理设备
     int device_id = 0;
+    // W8A16/W4A16: 量化模式使用 FP16 activation pipeline
+    llaisysDataType_t compute_dtype = LLAISYS_DTYPE_F32;
+    // KV Cache INT8 quantization (per-token per-head symmetric)
+    bool kv_cache_int8 = false;
 
     Qwen2Config() = default;
 
@@ -38,6 +42,7 @@ struct Qwen2Config {
         end_token_id = meta.end_token;
         device_type = dev;
         device_id = dev_id;
+        compute_dtype = LLAISYS_DTYPE_F32;
     }
 
     size_t kv_dim() const {

@@ -145,6 +145,33 @@ public:
 
     bool is_quantized() const { return quantized_; }
 
+    // 直接接受 tensor_t 的设置接口（用于 QKV merge 等内部场景）
+    void set_params_direct(tensor_t w, tensor_t b = nullptr) {
+        weight_ = w;
+        bias_ = b;
+        quantized_ = false;
+        int4_mode_ = false;
+    }
+
+    void set_params_quantized_direct(tensor_t w, tensor_t s, tensor_t b = nullptr) {
+        weight_ = w;
+        scales_ = s;
+        bias_ = b;
+        quantized_ = (w && s);
+        int4_mode_ = false;
+    }
+
+    void set_params_int4_direct(tensor_t w, tensor_t s, size_t gs, size_t K_orig,
+                                tensor_t b = nullptr) {
+        weight_ = w;
+        scales_ = s;
+        bias_ = b;
+        quantized_ = (w && s);
+        int4_mode_ = true;
+        group_size_ = gs;
+        K_orig_ = K_orig;
+    }
+
 private:
     tensor_t weight_;
     tensor_t bias_;
