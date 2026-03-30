@@ -16,7 +16,8 @@ void self_attention(
     size_t kv_head,
     size_t head_dim,
     size_t v_head_dim,
-    float scale
+    float scale,
+    const size_t* d_total_len = nullptr
 );
 void cleanup_self_attention_workspace();
 } // namespace llaisys::ops::nvidia

@@ -17,7 +17,8 @@ void kv_quantize_to_cache(
     size_t seq_len,
     size_t num_kv_heads,
     size_t head_dim,
-    size_t max_seq_len
+    size_t max_seq_len,
+    const size_t* d_start_pos = nullptr
 );
 
 // Dequantize INT8 cache → compute_dtype for attention computation
@@ -30,6 +31,17 @@ void kv_dequantize_from_cache(
     const int8_t* src,
     const float* scales,
     size_t valid_len,
+    size_t num_kv_heads,
+    size_t head_dim,
+    const size_t* d_offset = nullptr
+);
+
+// FP32 KV cache copy via kernel (for CUDA Graph static capture)
+void kv_cache_copy(
+    std::byte* cache,
+    const std::byte* src,
+    llaisysDataType_t dtype,
+    const size_t* d_start_pos,
     size_t num_kv_heads,
     size_t head_dim
 );

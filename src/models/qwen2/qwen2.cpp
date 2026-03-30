@@ -90,7 +90,15 @@ public:
             if (graph_env && std::string(graph_env) == "1") {
                 decode_graph_ = std::make_unique<llaisys::models::qwen2::CudaGraphManager>();
                 cuda_graph_enabled_ = true;
-                std::cerr << "[Qwen2] CUDA Graph enabled for decode" << std::endl;
+                // Allocate device buffers for static capture params
+                cudaMalloc(&d_start_pos_, sizeof(size_t));
+                cudaMalloc(&d_total_len_, sizeof(size_t));
+                // Max total_len for fused attention path (scores[total_len] in smem)
+                // Must stay under: (total_len + WARPS + head_dim) * 4 + static_smem < 48KB
+                // 8192 tokens × (Q+KV compute) is plenty for typical inference
+                graph_max_total_len_ = 8192;
+                std::cerr << "[Qwen2] CUDA Graph enabled (static capture, max_total_len="
+                          << graph_max_total_len_ << ")" << std::endl;
             }
         }
 #endif
@@ -99,6 +107,8 @@ public:
     ~Qwen2Model() {
 #ifdef ENABLE_NVIDIA_API
         if (decode_graph_) { decode_graph_->printStats(); decode_graph_.reset(); }
+        if (d_start_pos_) { cudaFree(d_start_pos_); d_start_pos_ = nullptr; }
+        if (d_total_len_) { cudaFree(d_total_len_); d_total_len_ = nullptr; }
 #endif
         free_weight_arrays();
         // 清理 FP16 权重缓存和 FlashDecoding workspace
@@ -134,17 +144,29 @@ public:
         // ── Forward pass ──
         size_t saved_pos = current_pos_;
 #ifdef ENABLE_NVIDIA_API
-        if (cuda_graph_enabled_ && ntoken == 1) {
+        if (cuda_graph_enabled_ && ntoken == 1 && (saved_pos + 1) <= graph_max_total_len_) {
             cudaStream_t stream = (cudaStream_t)core::context().runtime().stream();
-            decode_graph_->captureAndLaunch(stream, [&]() {
-                embed_.forward(ws_hidden_, ws_token_);
-                tensor_t current = ws_hidden_;
-                for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
-                    current = layers_[layer_idx].forward(current, saved_pos, ws_pos_);
-                final_norm_.forward(ws_final_norm_, current);
-                lm_head_.forward(ws_logits_, ws_final_norm_);
-                ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
-            });
+            size_t total_len = saved_pos + 1;
+            size_t hint = graph_max_total_len_;
+            decode_graph_->staticLaunch(stream,
+                [&]() {
+                    // Setup: H2D copies of changing params (NOT captured)
+                    cudaMemcpyAsync(d_start_pos_, &saved_pos, sizeof(size_t),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaMemcpyAsync(d_total_len_, &total_len, sizeof(size_t),
+                                    cudaMemcpyHostToDevice, stream);
+                },
+                [&]() {
+                    // Forward: captured once, replayed forever
+                    embed_.forward(ws_hidden_, ws_token_);
+                    tensor_t current = ws_hidden_;
+                    for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
+                        current = layers_[layer_idx].forward_graph(
+                            current, d_start_pos_, hint, d_total_len_, ws_pos_);
+                    final_norm_.forward(ws_final_norm_, current);
+                    lm_head_.forward(ws_logits_, ws_final_norm_);
+                    ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
+                });
         } else
 #endif
         {
@@ -198,17 +220,27 @@ public:
                          (temperature == 1.0f && top_k <= 0 && top_p >= 1.0f);
 
 #ifdef ENABLE_NVIDIA_API
-        if (cuda_graph_enabled_ && ntoken == 1) {
+        if (cuda_graph_enabled_ && ntoken == 1 && (saved_pos + 1) <= graph_max_total_len_) {
             cudaStream_t stream = (cudaStream_t)core::context().runtime().stream();
-            decode_graph_->captureAndLaunch(stream, [&]() {
-                embed_.forward(ws_hidden_, ws_token_);
-                tensor_t current = ws_hidden_;
-                for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
-                    current = layers_[layer_idx].forward(current, saved_pos, ws_pos_);
-                final_norm_.forward(ws_final_norm_, current);
-                lm_head_.forward(ws_logits_, ws_final_norm_);
-                ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
-            });
+            size_t total_len = saved_pos + 1;
+            size_t hint = graph_max_total_len_;
+            decode_graph_->staticLaunch(stream,
+                [&]() {
+                    cudaMemcpyAsync(d_start_pos_, &saved_pos, sizeof(size_t),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaMemcpyAsync(d_total_len_, &total_len, sizeof(size_t),
+                                    cudaMemcpyHostToDevice, stream);
+                },
+                [&]() {
+                    embed_.forward(ws_hidden_, ws_token_);
+                    tensor_t current = ws_hidden_;
+                    for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
+                        current = layers_[layer_idx].forward_graph(
+                            current, d_start_pos_, hint, d_total_len_, ws_pos_);
+                    final_norm_.forward(ws_final_norm_, current);
+                    lm_head_.forward(ws_logits_, ws_final_norm_);
+                    ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
+                });
             current_pos_ += ntoken;
 
             int64_t output_token = 0;
@@ -300,6 +332,10 @@ private:
 
 #ifdef ENABLE_NVIDIA_API
     std::unique_ptr<llaisys::models::qwen2::CudaGraphManager> decode_graph_;
+    // Static capture: device buffers for graph-invariant parameters
+    size_t* d_start_pos_ = nullptr;   // device pointer
+    size_t* d_total_len_ = nullptr;   // device pointer
+    size_t graph_max_total_len_ = 0;  // fused path threshold
 #endif
 
     void prepare_for_seq_len(size_t seq_len) {

@@ -68,11 +68,13 @@ __global__ void kv_quantize_kernel(
     size_t start_pos,
     size_t num_kv_heads,
     size_t head_dim,
-    size_t max_seq_len
+    size_t max_seq_len,
+    const size_t* d_start_pos  // device pointer override (for CUDA Graph static capture)
 ) {
-    const size_t seq_idx = blockIdx.x;      // which token in this batch
-    const size_t kv_h    = blockIdx.y;      // which KV head
-    const size_t global_pos = start_pos + seq_idx;  // absolute position in cache
+    const size_t seq_idx = blockIdx.x;
+    const size_t kv_h    = blockIdx.y;
+    const size_t sp = d_start_pos ? *d_start_pos : start_pos;
+    const size_t global_pos = sp + seq_idx;
 
     // Source row: src[seq_idx, kv_h, :]
     const T* src_row = src + (seq_idx * num_kv_heads + kv_h) * head_dim;
@@ -135,10 +137,11 @@ __global__ void kv_dequantize_kernel(
     const int8_t* __restrict__ src,    // [valid_len, num_kv_heads, head_dim]
     const float* __restrict__  scales, // [valid_len, num_kv_heads]
     size_t num_kv_heads,
-    size_t head_dim
+    size_t head_dim,
+    const size_t* d_offset  // device pointer offset (for CUDA Graph incremental dequant)
 ) {
-    const size_t t    = blockIdx.x;   // token position
-    const size_t kv_h = blockIdx.y;   // KV head
+    const size_t t    = blockIdx.x + (d_offset ? *d_offset : 0);
+    const size_t kv_h = blockIdx.y;
 
     float scale = scales[t * num_kv_heads + kv_h];
 
@@ -167,7 +170,8 @@ void kv_quantize_to_cache(
     size_t seq_len,
     size_t num_kv_heads,
     size_t head_dim,
-    size_t max_seq_len
+    size_t max_seq_len,
+    const size_t* d_start_pos
 ) {
     dim3 grid(static_cast<unsigned>(seq_len), static_cast<unsigned>(num_kv_heads));
     int threads = std::min(static_cast<int>(head_dim), 256);
@@ -178,17 +182,17 @@ void kv_quantize_to_cache(
     case LLAISYS_DTYPE_F32:
         kv_quantize_kernel<float><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             dst, scales, reinterpret_cast<const float*>(src),
-            start_pos, num_kv_heads, head_dim, max_seq_len);
+            start_pos, num_kv_heads, head_dim, max_seq_len, d_start_pos);
         break;
     case LLAISYS_DTYPE_F16:
         kv_quantize_kernel<__half><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             dst, scales, reinterpret_cast<const __half*>(src),
-            start_pos, num_kv_heads, head_dim, max_seq_len);
+            start_pos, num_kv_heads, head_dim, max_seq_len, d_start_pos);
         break;
     case LLAISYS_DTYPE_BF16:
         kv_quantize_kernel<__nv_bfloat16><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             dst, scales, reinterpret_cast<const __nv_bfloat16*>(src),
-            start_pos, num_kv_heads, head_dim, max_seq_len);
+            start_pos, num_kv_heads, head_dim, max_seq_len, d_start_pos);
         break;
     default:
         throw std::runtime_error("Unsupported dtype for kv_quantize_to_cache");
@@ -203,7 +207,8 @@ void kv_dequantize_from_cache(
     const float* scales,
     size_t valid_len,
     size_t num_kv_heads,
-    size_t head_dim
+    size_t head_dim,
+    const size_t* d_offset
 ) {
     dim3 grid(static_cast<unsigned>(valid_len), static_cast<unsigned>(num_kv_heads));
     int threads = std::min(static_cast<int>(head_dim), 256);
@@ -213,17 +218,17 @@ void kv_dequantize_from_cache(
     case LLAISYS_DTYPE_F32:
         kv_dequantize_kernel<float><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<float*>(dst), src, scales,
-            num_kv_heads, head_dim);
+            num_kv_heads, head_dim, d_offset);
         break;
     case LLAISYS_DTYPE_F16:
         kv_dequantize_kernel<__half><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<__half*>(dst), src, scales,
-            num_kv_heads, head_dim);
+            num_kv_heads, head_dim, d_offset);
         break;
     case LLAISYS_DTYPE_BF16:
         kv_dequantize_kernel<__nv_bfloat16><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<__nv_bfloat16*>(dst), src, scales,
-            num_kv_heads, head_dim);
+            num_kv_heads, head_dim, d_offset);
         break;
     default:
         throw std::runtime_error("Unsupported dtype for kv_dequantize_from_cache");
@@ -231,4 +236,61 @@ void kv_dequantize_from_cache(
     checkCuda(cudaGetLastError(), "kv_dequantize_kernel launch failed");
 }
 
+} // namespace llaisys::ops::nvidia
+
+// ============================================================
+//  KV Cache Copy (for CUDA Graph static capture of FP32 KV cache)
+//  Replaces memcpy_async which can't use device-side start_pos
+// ============================================================
+namespace {
+template <typename T>
+__global__ void kv_cache_copy_kernel(
+    T* __restrict__ cache,
+    const T* __restrict__ src,
+    const size_t* __restrict__ d_start_pos,
+    size_t stride
+) {
+    size_t pos = *d_start_pos;
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < stride) {
+        cache[pos * stride + idx] = src[idx];
+    }
+}
+} // anonymous namespace
+
+namespace llaisys::ops::nvidia {
+void kv_cache_copy(
+    std::byte* cache,
+    const std::byte* src,
+    llaisysDataType_t dtype,
+    const size_t* d_start_pos,
+    size_t num_kv_heads,
+    size_t head_dim
+) {
+    size_t stride = num_kv_heads * head_dim;
+    int block = 256;
+    int grid = static_cast<int>((stride + block - 1) / block);
+    cudaStream_t stream = (cudaStream_t)llaisys::core::context().runtime().stream();
+
+    switch (dtype) {
+    case LLAISYS_DTYPE_F32:
+        kv_cache_copy_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<float*>(cache), reinterpret_cast<const float*>(src),
+            d_start_pos, stride);
+        break;
+    case LLAISYS_DTYPE_F16:
+        kv_cache_copy_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__half*>(cache), reinterpret_cast<const __half*>(src),
+            d_start_pos, stride);
+        break;
+    case LLAISYS_DTYPE_BF16:
+        kv_cache_copy_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(cache), reinterpret_cast<const __nv_bfloat16*>(src),
+            d_start_pos, stride);
+        break;
+    default:
+        throw std::runtime_error("Unsupported dtype for kv_cache_copy");
+    }
+    checkCuda(cudaGetLastError(), "kv_cache_copy_kernel launch failed");
+}
 } // namespace llaisys::ops::nvidia

@@ -8,6 +8,7 @@
 
 #ifdef ENABLE_NVIDIA_API
 #include "../../ops/kv_cache_quant/nvidia/kv_cache_quant_nvidia.hpp"
+#include "../../ops/self_attention/nvidia/self_attention_nvidia.hpp"
 #endif
 
 #include <cmath>
@@ -124,6 +125,101 @@ public:
         }
 
         // O Projection
+        auto attn_2d = ws_attn_3d_->view(out_2d_shape_);
+        o_proj_.forward(ws_o_out_, attn_2d);
+        return ws_o_out_;
+    }
+
+    // === CUDA Graph static capture path (decode only, seq_len=1) ===
+    // Uses device pointers for start_pos/total_len → graph captures pointer
+    // addresses (constant). Values at pointers updated via H2D before launch.
+    tensor_t forward_graph(tensor_t x, const size_t* d_start_pos,
+                           size_t total_len_hint, const size_t* d_total_len,
+                           tensor_t pos_tensor) {
+        tensor_t q, k, v;
+
+        if (qkv_merged_) {
+            qkv_proj_.forward(ws_qkv_, x);
+            size_t nq = config_.hidden_size;
+            size_t nkv = config_.kv_dim();
+            q = ws_qkv_->slice(1, 0, nq)->view(q_shape_);
+            k = ws_qkv_->slice(1, nq, nq + nkv)->view(kv_shape_);
+            v = ws_qkv_->slice(1, nq + nkv, nq + 2 * nkv)->view(kv_shape_);
+        } else {
+            q_proj_.forward(ws_q_2d_, x);
+            k_proj_.forward(ws_k_2d_, x);
+            v_proj_.forward(ws_v_2d_, x);
+            q = ws_q_2d_->view(q_shape_);
+            k = ws_k_2d_->view(kv_shape_);
+            v = ws_v_2d_->view(kv_shape_);
+        }
+
+        ops::rope(ws_q_rope_, q, pos_tensor, config_.rope_theta);
+        ops::rope(ws_k_rope_, k, pos_tensor, config_.rope_theta);
+
+        float scale = 1.0f / std::sqrt(static_cast<float>(config_.head_dim));
+
+#ifdef ENABLE_NVIDIA_API
+        if (config_.kv_cache_int8) {
+            // Quantize new token → cache at d_start_pos (grid constant)
+            ops::nvidia::kv_quantize_to_cache(
+                reinterpret_cast<int8_t*>(k_cache_int8_->data()),
+                reinterpret_cast<float*>(k_scales_->data()),
+                ws_k_rope_->data(), ws_k_rope_->dtype(),
+                0, 1, config_.num_key_value_heads, config_.head_dim,
+                config_.max_position_embeddings, d_start_pos);
+            ops::nvidia::kv_quantize_to_cache(
+                reinterpret_cast<int8_t*>(v_cache_int8_->data()),
+                reinterpret_cast<float*>(v_scales_->data()),
+                v->data(), v->dtype(),
+                0, 1, config_.num_key_value_heads, config_.head_dim,
+                config_.max_position_embeddings, d_start_pos);
+
+            // Incremental dequant: only position *d_start_pos (grid=(1,nkvh) constant)
+            ops::nvidia::kv_dequantize_from_cache(
+                ws_k_dequant_->data(), ws_k_dequant_->dtype(),
+                reinterpret_cast<const int8_t*>(k_cache_int8_->data()),
+                reinterpret_cast<const float*>(k_scales_->data()),
+                1, config_.num_key_value_heads, config_.head_dim, d_start_pos);
+            ops::nvidia::kv_dequantize_from_cache(
+                ws_v_dequant_->data(), ws_v_dequant_->dtype(),
+                reinterpret_cast<const int8_t*>(v_cache_int8_->data()),
+                reinterpret_cast<const float*>(v_scales_->data()),
+                1, config_.num_key_value_heads, config_.head_dim, d_start_pos);
+
+            // Self attention: full dequant workspace, d_total_len for loops
+            ops::nvidia::self_attention(
+                ws_attn_3d_->data(), ws_attn_3d_->dtype(),
+                ws_q_rope_->data(),
+                ws_k_dequant_->data(),
+                ws_v_dequant_->data(),
+                1, total_len_hint,
+                config_.num_attention_heads, config_.num_key_value_heads,
+                config_.head_dim, config_.head_dim, scale,
+                d_total_len);
+        } else {
+            // FP32: copy to cache via device kernel (d_start_pos)
+            ops::nvidia::kv_cache_copy(
+                k_cache_->data(), ws_k_rope_->data(), ws_k_rope_->dtype(),
+                d_start_pos, config_.num_key_value_heads, config_.head_dim);
+            ops::nvidia::kv_cache_copy(
+                v_cache_->data(), v->data(), v->dtype(),
+                d_start_pos, config_.num_key_value_heads, config_.head_dim);
+
+            ops::nvidia::self_attention(
+                ws_attn_3d_->data(), ws_attn_3d_->dtype(),
+                ws_q_rope_->data(),
+                k_cache_->data(),
+                v_cache_->data(),
+                1, total_len_hint,
+                config_.num_attention_heads, config_.num_key_value_heads,
+                config_.head_dim, config_.head_dim, scale,
+                d_total_len);
+        }
+#else
+        ASSERT(false, "forward_graph requires NVIDIA backend");
+#endif
+
         auto attn_2d = ws_attn_3d_->view(out_2d_shape_);
         o_proj_.forward(ws_o_out_, attn_2d);
         return ws_o_out_;

@@ -191,13 +191,15 @@ __global__ void self_attention_fused(
     const T* __restrict__ k,          // [total_len, kv_head, head_dim]
     const T* __restrict__ v,          // [total_len, kv_head, v_head_dim]
     size_t seq_len, // query 序列长度
-    size_t total_len,   // KV 序列长度（包含 padding）
+    size_t total_len_hint,   // KV 序列长度 (smem 布局用; graph 模式下为 max_seq_len)
     size_t nhead,   // 注意力头总数
     size_t kv_head, // KV 头数（GQA 场景下 nhead % kv_head == 0）
     size_t head_dim, // 每个头的维度
     size_t v_head_dim, // 每个 V 头的维度
-    float scale // 缩放因子（通常是 1/sqrt(head_dim)）
+    float scale, // 缩放因子（通常是 1/sqrt(head_dim)）
+    const size_t* d_total_len = nullptr  // device pointer (static graph capture)
 ) {
+    const size_t total_len = d_total_len ? *d_total_len : total_len_hint;
     // ── 索引映射 ──
     size_t i    = blockIdx.x;                     // query 位置
     size_t h    = blockIdx.y;                     // 注意力头索引
@@ -207,7 +209,7 @@ __global__ void self_attention_fused(
     // 动态: scores[total_len] + warp_buf[WARPS] + s_q[head_dim]
     extern __shared__ char smem_bytes[];
     float* scores   = reinterpret_cast<float*>(smem_bytes);
-    float* warp_buf = scores + total_len; // 是 block reduce 的临时空间，WARPS 个 float
+    float* warp_buf = scores + total_len_hint; // 是 block reduce 的临时空间，WARPS 个 float
     float* s_q      = warp_buf + WARPS;           // Q 行（预转 float）
 
     // 静态: 用于广播归约结果
@@ -780,7 +782,8 @@ void self_attention(
     size_t kv_head,
     size_t head_dim,
     size_t v_head_dim,
-    float scale
+    float scale,
+    const size_t* d_total_len
 ) {
     constexpr int threads = THREADS;
     constexpr int MAX_DV = 4;
@@ -990,7 +993,7 @@ void self_attention(
     // ---
     //  FlashDecoding: decode (seq_len=1) + long enough KV
     // ---
-    if (seq_len == 1 && total_len > (size_t)FD_CHUNK_SIZE) {
+    if (seq_len == 1 && total_len > (size_t)FD_CHUNK_SIZE && d_total_len == nullptr) {
         size_t num_splits = (total_len + FD_CHUNK_SIZE - 1) / FD_CHUNK_SIZE;
         ensure_fd_workspace(num_splits, nhead, v_head_dim);
 
@@ -1101,7 +1104,8 @@ void self_attention(
                 reinterpret_cast<const float*>(q),
                 reinterpret_cast<const float*>(k),
                 reinterpret_cast<const float*>(v),
-                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
+                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale,
+                d_total_len
             );
             break;
         case LLAISYS_DTYPE_F16:
@@ -1110,7 +1114,8 @@ void self_attention(
                 reinterpret_cast<const __half*>(q),
                 reinterpret_cast<const __half*>(k),
                 reinterpret_cast<const __half*>(v),
-                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
+                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale,
+                d_total_len
             );
             break;
         case LLAISYS_DTYPE_BF16:
@@ -1119,7 +1124,8 @@ void self_attention(
                 reinterpret_cast<const __nv_bfloat16*>(q),
                 reinterpret_cast<const __nv_bfloat16*>(k),
                 reinterpret_cast<const __nv_bfloat16*>(v),
-                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale
+                seq_len, total_len, nhead, kv_head, head_dim, v_head_dim, scale,
+                d_total_len
             );
             break;
         default:

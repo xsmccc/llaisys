@@ -101,6 +101,30 @@ public:
         return ws_add2_;
     }
 
+    // CUDA Graph static capture path (decode only)
+    tensor_t forward_graph(tensor_t x, const size_t* d_start_pos,
+                           size_t total_len_hint, const size_t* d_total_len,
+                           tensor_t pos_tensor) {
+        auto residual = x;
+        input_norm_.forward(ws_norm1_, x);
+        auto attn_out = attn_.forward_graph(ws_norm1_, d_start_pos,
+                                            total_len_hint, d_total_len,
+                                            pos_tensor);
+
+        if (mlp_norm_tensor_) {
+            ops::fused_add_rmsnorm(ws_norm2_, ws_add1_, attn_out, residual,
+                                   mlp_norm_tensor_, config_.rms_norm_eps);
+        } else {
+            ops::add(ws_add1_, attn_out, residual);
+            post_attn_norm_.forward(ws_norm2_, ws_add1_);
+        }
+
+        residual = ws_add1_;
+        auto mlp_out = mlp_.forward(ws_norm2_);
+        ops::add(ws_add2_, mlp_out, residual);
+        return ws_add2_;
+    }
+
     tensor_t forward(tensor_t x, size_t pos) {
         std::vector<size_t> ps = {1};
         std::vector<int64_t> ph = {static_cast<int64_t>(pos)};
