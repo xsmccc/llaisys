@@ -10,6 +10,7 @@
 
 #include "swiglu_nvidia.hpp"
 #include "../../../utils.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -289,7 +290,7 @@ void launch_swiglu_kernel(
 
     switch (dtype) {
     case LLAISYS_DTYPE_F32:
-        swiglu_kernel_f32_vec4<<<BLOCKS, THREADS>>>(
+        swiglu_kernel_f32_vec4<<<BLOCKS, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<float*>(out),
             reinterpret_cast<const float*>(gate),
             reinterpret_cast<const float*>(up),
@@ -297,7 +298,7 @@ void launch_swiglu_kernel(
         );
         break;
     case LLAISYS_DTYPE_F16:
-        swiglu_kernel_f16_vec4<<<BLOCKS, THREADS>>>(
+        swiglu_kernel_f16_vec4<<<BLOCKS, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::fp16_t*>(out),
             reinterpret_cast<const llaisys::fp16_t*>(gate),
             reinterpret_cast<const llaisys::fp16_t*>(up),
@@ -305,7 +306,7 @@ void launch_swiglu_kernel(
         );
         break;
     case LLAISYS_DTYPE_BF16:
-        swiglu_kernel_bf16_vec4<<<BLOCKS, THREADS>>>(
+        swiglu_kernel_bf16_vec4<<<BLOCKS, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::bf16_t*>(out),
             reinterpret_cast<const llaisys::bf16_t*>(gate),
             reinterpret_cast<const llaisys::bf16_t*>(up),

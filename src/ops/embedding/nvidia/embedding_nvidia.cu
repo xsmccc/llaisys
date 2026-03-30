@@ -24,6 +24,7 @@
 
 #include "embedding_nvidia.hpp"
 #include "../../../utils.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -163,7 +164,7 @@ void launch_embedding_typed(
 
     switch (out_type) {
     case LLAISYS_DTYPE_F32:
-        embedding_kernel_f32<<<blocks, THREADS>>>(
+        embedding_kernel_f32<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<float*>(out_ptr),
             index_ptr,
             reinterpret_cast<const float*>(weight_ptr),
@@ -171,7 +172,7 @@ void launch_embedding_typed(
         );
         break;
     case LLAISYS_DTYPE_F16:
-        embedding_kernel_f16<<<blocks, THREADS>>>(
+        embedding_kernel_f16<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::fp16_t*>(out_ptr),
             index_ptr,
             reinterpret_cast<const llaisys::fp16_t*>(weight_ptr),
@@ -179,7 +180,7 @@ void launch_embedding_typed(
         );
         break;
     case LLAISYS_DTYPE_BF16:
-        embedding_kernel_bf16<<<blocks, THREADS>>>(
+        embedding_kernel_bf16<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::bf16_t*>(out_ptr),
             index_ptr,
             reinterpret_cast<const llaisys::bf16_t*>(weight_ptr),

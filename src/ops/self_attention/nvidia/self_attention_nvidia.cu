@@ -35,10 +35,12 @@
 
 #include "self_attention_nvidia.hpp"
 #include "../../../utils.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cublas_v2.h>
 
 #include <stdexcept>
 #include <iostream>
@@ -47,6 +49,43 @@ namespace {
 
 constexpr int THREADS = 256;
 constexpr int WARPS   = THREADS / 32;  // 8
+
+// ── cuBLAS handle (singleton) ──
+static cublasHandle_t get_cublas_handle() {
+    static cublasHandle_t handle = nullptr;
+    if (!handle) {
+        if (cublasCreate(&handle) != CUBLAS_STATUS_SUCCESS)
+            throw std::runtime_error("cublasCreate failed in self_attention");
+        cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH);
+    }
+    return handle;
+}
+
+inline void checkCublas(cublasStatus_t st, const char* msg) {
+    if (st != CUBLAS_STATUS_SUCCESS)
+        throw std::runtime_error(std::string("cuBLAS error: ") + msg);
+}
+
+// ── Prefill workspace (scores buffer) ──
+static void* s_prefill_workspace = nullptr;
+static size_t s_prefill_workspace_bytes = 0;
+
+static float* ensure_prefill_workspace(size_t needed_bytes) {
+    if (needed_bytes > s_prefill_workspace_bytes) {
+        if (s_prefill_workspace) cudaFree(s_prefill_workspace);
+        cudaMalloc(&s_prefill_workspace, needed_bytes);
+        s_prefill_workspace_bytes = needed_bytes;
+    }
+    return reinterpret_cast<float*>(s_prefill_workspace);
+}
+
+static void cleanup_prefill_workspace() {
+    if (s_prefill_workspace) {
+        cudaFree(s_prefill_workspace);
+        s_prefill_workspace = nullptr;
+        s_prefill_workspace_bytes = 0;
+    }
+}
 
 inline void checkCuda(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {
@@ -658,6 +697,70 @@ __global__ void flash_decoding_reduce_kernel(
     }
 }
 
+
+// ============================================================
+//  Causal Softmax Kernel (用于 cuBLAS prefill 路径)
+// ============================================================
+//  grid: (seq_len, nhead), block: (THREADS)
+//  S: [nhead, seq_len, total_len] — 每个 block 处理一行 S[h, i, :]
+__global__ void causal_softmax_kernel(
+    float* __restrict__ S,
+    size_t seq_len,
+    size_t total_len,
+    size_t current_offset  // total_len - seq_len
+) {
+    const size_t i = blockIdx.x;  // query position
+    const size_t h = blockIdx.y;  // head
+
+    float* row = S + (h * seq_len + i) * total_len;
+    const size_t current_pos = current_offset + i;
+
+    extern __shared__ char smem[];
+    float* warp_buf = reinterpret_cast<float*>(smem);
+    __shared__ float s_max, s_sum;
+
+    // Causal mask + find max
+    float local_max = -INFINITY;
+    for (size_t t = threadIdx.x; t < total_len; t += blockDim.x) {
+        if (t > current_pos) row[t] = -INFINITY;
+        local_max = fmaxf(local_max, row[t]);
+    }
+    local_max = block_reduce_max(local_max, warp_buf);
+    if (threadIdx.x == 0) s_max = local_max;
+    __syncthreads();
+    float max_val = s_max;
+
+    // exp + sum
+    float local_sum = 0.0f;
+    for (size_t t = threadIdx.x; t < total_len; t += blockDim.x) {
+        float val = expf(row[t] - max_val);
+        row[t] = val;
+        local_sum += val;
+    }
+    local_sum = block_reduce_sum(local_sum, warp_buf);
+    if (threadIdx.x == 0) s_sum = local_sum;
+    __syncthreads();
+    float inv_sum = (s_sum > 0.0f) ? (1.0f / s_sum) : 0.0f;
+
+    // Normalize
+    for (size_t t = threadIdx.x; t < total_len; t += blockDim.x) {
+        row[t] *= inv_sum;
+    }
+}
+
+// F32 → T 类型转换 kernel (softmax 后 scores 转回 F16/BF16)
+template <typename T>
+__global__ void convert_f32_to_T_kernel(
+    T* __restrict__ out,
+    const float* __restrict__ in,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[idx] = from_float<T>(in[idx]);
+    }
+}
+
 } // anonymous namespace
 
 // ============================================================
@@ -689,6 +792,199 @@ void self_attention(
             std::to_string(v_head_dim) + "/" + std::to_string(threads) +
             " > " + std::to_string(MAX_DV) + "). Increase MAX_DV.");
     }
+
+    // ─────────────────────────────────────────────────────────
+    //  cuBLAS Prefill Path: seq_len > 1 时用 batched GEMM
+    //  比自定义 kernel 快 10 倍以上 (真正的 GEMM 问题)
+    // ─────────────────────────────────────────────────────────
+    if (seq_len > 1 && seq_len * total_len > 128 * 128) {
+        cublasHandle_t cublas_handle = get_cublas_handle();
+        const size_t group_size = nhead / kv_head;
+
+        // Workspace: scores [nhead, seq_len, total_len] in F32
+        // For F16/BF16: + converted scores in input type
+        size_t scores_count = nhead * seq_len * total_len;
+        size_t needed = scores_count * sizeof(float);
+        bool need_convert = (dtype != LLAISYS_DTYPE_F32);
+        if (need_convert) needed += scores_count * 2;  // sizeof(__half/bf16) = 2
+        float* scores = ensure_prefill_workspace(needed);
+
+        float alpha_qk = scale;
+        float beta_zero = 0.0f;
+        float alpha_sv = 1.0f;
+
+        // ═══ Step 1: S = Q × K^T × scale ═══
+        // Row-major trick: S_h^T = K_h × Q_h^T (col-major cuBLAS)
+        //   transa=T: K stored [head_dim, total_len]_cm → transpose → [total_len, head_dim]
+        //   transb=N: Q stored [head_dim, seq_len]_cm → already [head_dim, seq_len]
+        //   C = S^T: [total_len, seq_len]_cm = [seq_len, total_len]_rm
+
+        auto launch_qkt = [&](auto* dummy_type, cudaDataType_t cuda_dtype) {
+            using DT = std::remove_pointer_t<decltype(dummy_type)>;
+            const DT* Q_ptr = reinterpret_cast<const DT*>(q);
+            const DT* K_ptr = reinterpret_cast<const DT*>(k);
+
+            if (nhead == kv_head) {
+                // MHA fast path: single batched call for all heads
+                checkCublas(
+                    cublasGemmStridedBatchedEx(cublas_handle,
+                        CUBLAS_OP_T, CUBLAS_OP_N,
+                        (int)total_len, (int)seq_len, (int)head_dim,
+                        &alpha_qk,
+                        K_ptr, cuda_dtype, (int)(kv_head * head_dim),
+                        (long long)head_dim,
+                        Q_ptr, cuda_dtype, (int)(nhead * head_dim),
+                        (long long)head_dim,
+                        &beta_zero,
+                        scores, CUDA_R_32F, (int)total_len,
+                        (long long)(seq_len * total_len),
+                        (int)nhead,
+                        CUBLAS_COMPUTE_32F,
+                        CUBLAS_GEMM_DEFAULT_TENSOR_OP),
+                    "prefill QK^T MHA");
+            } else {
+                // GQA: loop over KV head groups
+                for (size_t kv_h = 0; kv_h < kv_head; kv_h++) {
+                    size_t first_h = kv_h * group_size;
+                    checkCublas(
+                        cublasGemmStridedBatchedEx(cublas_handle,
+                            CUBLAS_OP_T, CUBLAS_OP_N,
+                            (int)total_len, (int)seq_len, (int)head_dim,
+                            &alpha_qk,
+                            K_ptr + kv_h * head_dim, cuda_dtype, (int)(kv_head * head_dim),
+                            (long long)0,
+                            Q_ptr + first_h * head_dim, cuda_dtype, (int)(nhead * head_dim),
+                            (long long)head_dim,
+                            &beta_zero,
+                            scores + first_h * seq_len * total_len, CUDA_R_32F, (int)total_len,
+                            (long long)(seq_len * total_len),
+                            (int)group_size,
+                            CUBLAS_COMPUTE_32F,
+                            CUBLAS_GEMM_DEFAULT_TENSOR_OP),
+                        "prefill QK^T GQA");
+                }
+            }
+        };
+
+        switch (dtype) {
+        case LLAISYS_DTYPE_F32:  { float* p = nullptr; launch_qkt(p, CUDA_R_32F); break; }
+        case LLAISYS_DTYPE_F16:  { __half* p = nullptr; launch_qkt(p, CUDA_R_16F); break; }
+        case LLAISYS_DTYPE_BF16: { __nv_bfloat16* p = nullptr; launch_qkt(p, CUDA_R_16BF); break; }
+        default: EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
+        }
+
+        // ═══ Step 2: Causal Softmax (in-place on F32 scores) ═══
+        dim3 softmax_grid((unsigned)seq_len, (unsigned)nhead);
+        size_t softmax_smem = WARPS * sizeof(float);
+        causal_softmax_kernel<<<softmax_grid, THREADS, softmax_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
+            scores, seq_len, total_len, total_len - seq_len);
+        checkCuda(cudaGetLastError(), "causal_softmax_kernel launch failed");
+
+        // ═══ Step 3: O = S × V ═══
+        // Row-major trick: O_h^T = V_h_cm × S_h^T_cm (both CUBLAS_OP_N)
+        //   A = V: [v_head_dim, total_len]_cm,  B = S^T: [total_len, seq_len]_cm
+        //   C = O^T: [v_head_dim, seq_len]_cm = [seq_len, v_head_dim]_rm (interleaved)
+
+        if (dtype == LLAISYS_DTYPE_F32) {
+            // F32: scores already F32, V is F32 → cublasSgemm
+            const float* V_ptr = reinterpret_cast<const float*>(v);
+            float* O_ptr = reinterpret_cast<float*>(attn_val_ptr);
+            if (nhead == kv_head) {
+                // MHA fast path
+                checkCublas(
+                    cublasSgemmStridedBatched(cublas_handle,
+                        CUBLAS_OP_N, CUBLAS_OP_N,
+                        (int)v_head_dim, (int)seq_len, (int)total_len,
+                        &alpha_sv,
+                        V_ptr, (int)(kv_head * v_head_dim),
+                        (long long)v_head_dim,
+                        scores, (int)total_len,
+                        (long long)(seq_len * total_len),
+                        &beta_zero,
+                        O_ptr, (int)(nhead * v_head_dim),
+                        (long long)v_head_dim,
+                        (int)nhead),
+                    "prefill SV F32 MHA");
+            } else {
+                for (size_t kv_h = 0; kv_h < kv_head; kv_h++) {
+                    size_t first_h = kv_h * group_size;
+                    checkCublas(
+                        cublasSgemmStridedBatched(cublas_handle,
+                            CUBLAS_OP_N, CUBLAS_OP_N,
+                            (int)v_head_dim, (int)seq_len, (int)total_len,
+                            &alpha_sv,
+                            V_ptr + kv_h * v_head_dim, (int)(kv_head * v_head_dim),
+                            (long long)0,
+                            scores + first_h * seq_len * total_len, (int)total_len,
+                            (long long)(seq_len * total_len),
+                            &beta_zero,
+                            O_ptr + first_h * v_head_dim, (int)(nhead * v_head_dim),
+                            (long long)v_head_dim,
+                            (int)group_size),
+                        "prefill SV F32 GQA");
+                }
+            }
+        } else {
+            // F16/BF16: convert scores F32→T, then T×T GEMM
+            auto launch_sv = [&](auto* dummy_type, cudaDataType_t cuda_dtype) {
+                using DT = std::remove_pointer_t<decltype(dummy_type)>;
+                DT* scores_T = reinterpret_cast<DT*>(
+                    reinterpret_cast<char*>(scores) + scores_count * sizeof(float));
+                size_t cvt_blocks = (scores_count + 255) / 256;
+                convert_f32_to_T_kernel<DT><<<cvt_blocks, 256>>>(scores_T, scores, scores_count);
+
+                const DT* V_ptr = reinterpret_cast<const DT*>(v);
+                DT* O_ptr = reinterpret_cast<DT*>(attn_val_ptr);
+                if (nhead == kv_head) {
+                    // MHA fast path
+                    checkCublas(
+                        cublasGemmStridedBatchedEx(cublas_handle,
+                            CUBLAS_OP_N, CUBLAS_OP_N,
+                            (int)v_head_dim, (int)seq_len, (int)total_len,
+                            &alpha_sv,
+                            V_ptr, cuda_dtype, (int)(kv_head * v_head_dim),
+                            (long long)v_head_dim,
+                            scores_T, cuda_dtype, (int)total_len,
+                            (long long)(seq_len * total_len),
+                            &beta_zero,
+                            O_ptr, cuda_dtype, (int)(nhead * v_head_dim),
+                            (long long)v_head_dim,
+                            (int)nhead,
+                            CUBLAS_COMPUTE_32F,
+                            CUBLAS_GEMM_DEFAULT_TENSOR_OP),
+                        "prefill SV F16/BF16 MHA");
+                } else {
+                    for (size_t kv_h = 0; kv_h < kv_head; kv_h++) {
+                        size_t first_h = kv_h * group_size;
+                        checkCublas(
+                            cublasGemmStridedBatchedEx(cublas_handle,
+                                CUBLAS_OP_N, CUBLAS_OP_N,
+                                (int)v_head_dim, (int)seq_len, (int)total_len,
+                                &alpha_sv,
+                                V_ptr + kv_h * v_head_dim, cuda_dtype, (int)(kv_head * v_head_dim),
+                                (long long)0,
+                                scores_T + first_h * seq_len * total_len, cuda_dtype, (int)total_len,
+                                (long long)(seq_len * total_len),
+                                &beta_zero,
+                                O_ptr + first_h * v_head_dim, cuda_dtype, (int)(nhead * v_head_dim),
+                                (long long)v_head_dim,
+                                (int)group_size,
+                                CUBLAS_COMPUTE_32F,
+                                CUBLAS_GEMM_DEFAULT_TENSOR_OP),
+                            "prefill SV F16/BF16 GQA");
+                    }
+                }
+            };
+
+            switch (dtype) {
+            case LLAISYS_DTYPE_F16:  { __half* p = nullptr; launch_sv(p, CUDA_R_16F); break; }
+            case LLAISYS_DTYPE_BF16: { __nv_bfloat16* p = nullptr; launch_sv(p, CUDA_R_16BF); break; }
+            default: EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
+            }
+        }
+        return;
+    }
+
 
     // ---
     //  FlashDecoding: decode (seq_len=1) + long enough KV
@@ -834,6 +1130,7 @@ void self_attention(
 
 void cleanup_self_attention_workspace() {
     cleanup_fd_workspace();
+    cleanup_prefill_workspace();
 }
 
 } // namespace llaisys::ops::nvidia

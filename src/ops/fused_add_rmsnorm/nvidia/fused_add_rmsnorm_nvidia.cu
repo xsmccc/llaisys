@@ -29,7 +29,8 @@
 
 #include "fused_add_rmsnorm_nvidia.hpp"
 #include "../../../utils.hpp"
-
+#include "../../../core/context/context.hpp"
+#include "../../../core/context/context.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -209,7 +210,7 @@ void launch_fused_add_rmsnorm(
 
     switch (dtype) {
     case LLAISYS_DTYPE_F32:
-        fused_add_rmsnorm_kernel<float><<<grid, block>>>(
+        fused_add_rmsnorm_kernel<float><<<grid, block, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<float*>(out_ptr),
             reinterpret_cast<float*>(residual_out_ptr),
             reinterpret_cast<const float*>(a_ptr),
@@ -218,7 +219,7 @@ void launch_fused_add_rmsnorm(
             rows, cols, eps);
         break;
     case LLAISYS_DTYPE_F16:
-        fused_add_rmsnorm_kernel<llaisys::fp16_t><<<grid, block>>>(
+        fused_add_rmsnorm_kernel<llaisys::fp16_t><<<grid, block, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::fp16_t*>(out_ptr),
             reinterpret_cast<llaisys::fp16_t*>(residual_out_ptr),
             reinterpret_cast<const llaisys::fp16_t*>(a_ptr),
@@ -227,7 +228,7 @@ void launch_fused_add_rmsnorm(
             rows, cols, eps);
         break;
     case LLAISYS_DTYPE_BF16:
-        fused_add_rmsnorm_kernel<llaisys::bf16_t><<<grid, block>>>(
+        fused_add_rmsnorm_kernel<llaisys::bf16_t><<<grid, block, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::bf16_t*>(out_ptr),
             reinterpret_cast<llaisys::bf16_t*>(residual_out_ptr),
             reinterpret_cast<const llaisys::bf16_t*>(a_ptr),

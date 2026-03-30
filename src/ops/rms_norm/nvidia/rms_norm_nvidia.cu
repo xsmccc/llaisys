@@ -27,6 +27,7 @@
 
 #include "rms_norm_nvidia.hpp"
 #include "../../../utils.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -205,7 +206,7 @@ void launch_rms_norm(
 
     switch (dtype) {
     case LLAISYS_DTYPE_F32:
-        rms_norm_kernel<<<blocks, THREADS>>>(
+        rms_norm_kernel<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<float*>(out_ptr),
             reinterpret_cast<const float*>(in_ptr),
             reinterpret_cast<const float*>(weight_ptr),
@@ -213,7 +214,7 @@ void launch_rms_norm(
         );
         break;
     case LLAISYS_DTYPE_F16:
-        rms_norm_kernel<<<blocks, THREADS>>>(
+        rms_norm_kernel<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::fp16_t*>(out_ptr),
             reinterpret_cast<const llaisys::fp16_t*>(in_ptr),
             reinterpret_cast<const llaisys::fp16_t*>(weight_ptr),
@@ -221,7 +222,7 @@ void launch_rms_norm(
         );
         break;
     case LLAISYS_DTYPE_BF16:
-        rms_norm_kernel<<<blocks, THREADS>>>(
+        rms_norm_kernel<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::bf16_t*>(out_ptr),
             reinterpret_cast<const llaisys::bf16_t*>(in_ptr),
             reinterpret_cast<const llaisys::bf16_t*>(weight_ptr),

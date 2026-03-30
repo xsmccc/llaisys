@@ -29,6 +29,7 @@
 
 #include "linear_quantized_nvidia.hpp"
 #include "../../../utils.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -400,11 +401,11 @@ __half* get_or_create_fp16_weight(
     constexpr int T = 256;
     if (K % 4 == 0) {
         size_t vecs = N * (K / 4);
-        dequant_int8_to_fp16_vec4<<<(int)((vecs + T - 1) / T), T>>>(
+        dequant_int8_to_fp16_vec4<<<(int)((vecs + T - 1) / T), T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             w_fp16, weight_int8, scales, N, K);
     } else {
         size_t tot = N * K;
-        dequant_int8_to_fp16_scalar<<<(int)((tot + T - 1) / T), T>>>(
+        dequant_int8_to_fp16_scalar<<<(int)((tot + T - 1) / T), T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             w_fp16, weight_int8, scales, N, K);
     }
     checkCuda(cudaGetLastError(), "dequant kernel");
@@ -439,7 +440,7 @@ __half* get_or_create_fp16_weight_int4(
 
     constexpr int T = 256;
     size_t total = N * K_packed;
-    dequant_int4_to_fp16_group<<<(int)((total + T - 1) / T), T>>>(
+    dequant_int4_to_fp16_group<<<(int)((total + T - 1) / T), T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
         w_fp16, weight_packed, scales, N, K_packed, num_groups, group_size);
     checkCuda(cudaGetLastError(), "dequant_int4 kernel");
     checkCuda(cudaDeviceSynchronize(), "dequant_int4 sync");
@@ -474,7 +475,7 @@ void linear_quantized_impl(
             g_input_fp16_buf.ensure(in_count * sizeof(__half));
             __half* buf = static_cast<__half*>(g_input_fp16_buf.ptr);
             constexpr int T = 256;
-            f32_to_fp16<<<(int)((in_count + T - 1) / T), T>>>(
+            f32_to_fp16<<<(int)((in_count + T - 1) / T), T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 buf, reinterpret_cast<const float*>(in), in_count);
             checkCuda(cudaGetLastError(), "f32->fp16");
             in_fp16 = buf;
@@ -485,7 +486,7 @@ void linear_quantized_impl(
             int grid = ((int)N + GEMV_WARPS_PER_BLOCK - 1) / GEMV_WARPS_PER_BLOCK;
             size_t smem = K * sizeof(__half);
             bool out_is_fp16 = (out_dtype == LLAISYS_DTYPE_F16);
-            int8_gemv_kernel<<<grid, GEMV_BLOCK_DIM, smem>>>(
+            int8_gemv_kernel<<<grid, GEMV_BLOCK_DIM, smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 out, in_fp16, weight_int8, scales, (int)N, (int)K, out_is_fp16);
             checkCuda(cudaGetLastError(), "int8_gemv_kernel");
         } else {
@@ -519,16 +520,16 @@ void linear_quantized_impl(
         int blocks = (int)((total + T - 1) / T);
         if (out_dtype == LLAISYS_DTYPE_F16) {
             if (bias_dtype == LLAISYS_DTYPE_F16) {
-                add_bias_fp16<<<blocks, T>>>(
+                add_bias_fp16<<<blocks, T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                     reinterpret_cast<__half*>(out),
                     reinterpret_cast<const __half*>(bias), M, N);
             } else {
-                add_bias_fp16_from_f32<<<blocks, T>>>(
+                add_bias_fp16_from_f32<<<blocks, T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                     reinterpret_cast<__half*>(out),
                     reinterpret_cast<const float*>(bias), M, N);
             }
         } else {
-            add_bias_f32<<<blocks, T>>>(
+            add_bias_f32<<<blocks, T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<float*>(out),
                 reinterpret_cast<const float*>(bias), M, N);
         }
@@ -564,7 +565,7 @@ void linear_quantized_int4_impl(
         g_input_fp16_buf.ensure(in_count * sizeof(__half));
         __half* buf = static_cast<__half*>(g_input_fp16_buf.ptr);
         constexpr int T = 256;
-        f32_to_fp16<<<(int)((in_count + T - 1) / T), T>>>(
+        f32_to_fp16<<<(int)((in_count + T - 1) / T), T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             buf, reinterpret_cast<const float*>(in), in_count);
         checkCuda(cudaGetLastError(), "f32->fp16 (INT4)");
         in_fp16 = buf;
@@ -575,7 +576,7 @@ void linear_quantized_int4_impl(
         int grid = ((int)N + GEMV_WARPS_PER_BLOCK - 1) / GEMV_WARPS_PER_BLOCK;
         size_t smem = K_orig * sizeof(__half);
         bool out_is_fp16 = (out_dtype == LLAISYS_DTYPE_F16);
-        int4_gemv_kernel<<<grid, GEMV_BLOCK_DIM, smem>>>(
+        int4_gemv_kernel<<<grid, GEMV_BLOCK_DIM, smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             out, in_fp16, weight_packed, scales,
             (int)N, (int)K_orig, (int)num_groups, (int)group_size, out_is_fp16);
         checkCuda(cudaGetLastError(), "int4_gemv_kernel");
@@ -605,16 +606,16 @@ void linear_quantized_int4_impl(
         int blocks = (int)((total + T - 1) / T);
         if (out_dtype == LLAISYS_DTYPE_F16) {
             if (bias_dtype == LLAISYS_DTYPE_F16) {
-                add_bias_fp16<<<blocks, T>>>(
+                add_bias_fp16<<<blocks, T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                     reinterpret_cast<__half*>(out),
                     reinterpret_cast<const __half*>(bias), M, N);
             } else {
-                add_bias_fp16_from_f32<<<blocks, T>>>(
+                add_bias_fp16_from_f32<<<blocks, T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                     reinterpret_cast<__half*>(out),
                     reinterpret_cast<const float*>(bias), M, N);
             }
         } else {
-            add_bias_f32<<<blocks, T>>>(
+            add_bias_f32<<<blocks, T, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<float*>(out),
                 reinterpret_cast<const float*>(bias), M, N);
         }

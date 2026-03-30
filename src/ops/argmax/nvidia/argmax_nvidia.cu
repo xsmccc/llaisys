@@ -36,6 +36,7 @@
 
 #include "argmax_nvidia.hpp"
 #include "../../../utils.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -299,7 +300,7 @@ void launch_argmax_typed(
     // ── 小数据：单 block 直接归约 ──
     // numel <= 1024 时，256 线程每人只处理 4 个元素，开多 block 反而浪费
     if (numel <= 1024) {
-        argmax_kernel<T, IndexT><<<1, THREADS>>>(max_idx, max_val, vals, numel);
+        argmax_kernel<T, IndexT><<<1, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(max_idx, max_val, vals, numel);
         checkCuda(cudaGetLastError(), "Failed to launch argmax kernel (single-block)");
         return;
     }
@@ -324,11 +325,11 @@ void launch_argmax_typed(
     g_temp_buf.ensure(num_blocks);
 
     // Phase 1: 多 block 并行归约
-    argmax_phase1<T><<<num_blocks, THREADS>>>(
+    argmax_phase1<T><<<num_blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
         g_temp_buf.vals, g_temp_buf.idxs, vals, numel);
 
     // Phase 2: 单 block 汇总
-    argmax_phase2<T, IndexT><<<1, THREADS>>>(
+    argmax_phase2<T, IndexT><<<1, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
         max_idx, max_val, vals,
         g_temp_buf.vals, g_temp_buf.idxs, num_blocks);
 

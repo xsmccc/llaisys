@@ -14,6 +14,7 @@
 // ============================================================
 
 #include "kv_cache_quant_nvidia.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -175,17 +176,17 @@ void kv_quantize_to_cache(
 
     switch (src_dtype) {
     case LLAISYS_DTYPE_F32:
-        kv_quantize_kernel<float><<<grid, threads>>>(
+        kv_quantize_kernel<float><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             dst, scales, reinterpret_cast<const float*>(src),
             start_pos, num_kv_heads, head_dim, max_seq_len);
         break;
     case LLAISYS_DTYPE_F16:
-        kv_quantize_kernel<__half><<<grid, threads>>>(
+        kv_quantize_kernel<__half><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             dst, scales, reinterpret_cast<const __half*>(src),
             start_pos, num_kv_heads, head_dim, max_seq_len);
         break;
     case LLAISYS_DTYPE_BF16:
-        kv_quantize_kernel<__nv_bfloat16><<<grid, threads>>>(
+        kv_quantize_kernel<__nv_bfloat16><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             dst, scales, reinterpret_cast<const __nv_bfloat16*>(src),
             start_pos, num_kv_heads, head_dim, max_seq_len);
         break;
@@ -210,17 +211,17 @@ void kv_dequantize_from_cache(
 
     switch (dst_dtype) {
     case LLAISYS_DTYPE_F32:
-        kv_dequantize_kernel<float><<<grid, threads>>>(
+        kv_dequantize_kernel<float><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<float*>(dst), src, scales,
             num_kv_heads, head_dim);
         break;
     case LLAISYS_DTYPE_F16:
-        kv_dequantize_kernel<__half><<<grid, threads>>>(
+        kv_dequantize_kernel<__half><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<__half*>(dst), src, scales,
             num_kv_heads, head_dim);
         break;
     case LLAISYS_DTYPE_BF16:
-        kv_dequantize_kernel<__nv_bfloat16><<<grid, threads>>>(
+        kv_dequantize_kernel<__nv_bfloat16><<<grid, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<__nv_bfloat16*>(dst), src, scales,
             num_kv_heads, head_dim);
         break;

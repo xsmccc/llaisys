@@ -28,6 +28,7 @@
 
 #include "linear_nvidia.hpp"
 #include "../../../utils.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -242,11 +243,11 @@ inline void launch_bias_f32(float* out, const float* bias, size_t rows, size_t N
     if (N % 4 == 0) {
         size_t total_vec = rows * (N / 4);
         int blocks = static_cast<int>((total_vec + THREADS - 1) / THREADS);
-        add_bias_f32<<<blocks, THREADS>>>(out, bias, rows, N);
+        add_bias_f32<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(out, bias, rows, N);
     } else {
         size_t total = rows * N;
         int blocks = static_cast<int>((total + THREADS - 1) / THREADS);
-        add_bias_f32_scalar<<<blocks, THREADS>>>(out, bias, rows, N);
+        add_bias_f32_scalar<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(out, bias, rows, N);
     }
     checkCuda(cudaGetLastError(), "add_bias_f32 launch failed");
 }
@@ -256,11 +257,11 @@ inline void launch_bias_f16(__half* out, const __half* bias, size_t rows, size_t
     if (N % 8 == 0) {
         size_t total_vec = rows * (N / 8);
         int blocks = static_cast<int>((total_vec + THREADS - 1) / THREADS);
-        add_bias_f16<<<blocks, THREADS>>>(out, bias, rows, N);
+        add_bias_f16<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(out, bias, rows, N);
     } else {
         size_t total = rows * N;
         int blocks = static_cast<int>((total + THREADS - 1) / THREADS);
-        add_bias_f16_scalar<<<blocks, THREADS>>>(out, bias, rows, N);
+        add_bias_f16_scalar<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(out, bias, rows, N);
     }
     checkCuda(cudaGetLastError(), "add_bias_f16 launch failed");
 }
@@ -270,11 +271,11 @@ inline void launch_bias_bf16(__nv_bfloat16* out, const __nv_bfloat16* bias, size
     if (N % 8 == 0) {
         size_t total_vec = rows * (N / 8);
         int blocks = static_cast<int>((total_vec + THREADS - 1) / THREADS);
-        add_bias_bf16<<<blocks, THREADS>>>(out, bias, rows, N);
+        add_bias_bf16<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(out, bias, rows, N);
     } else {
         size_t total = rows * N;
         int blocks = static_cast<int>((total + THREADS - 1) / THREADS);
-        add_bias_bf16_scalar<<<blocks, THREADS>>>(out, bias, rows, N);
+        add_bias_bf16_scalar<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(out, bias, rows, N);
     }
     checkCuda(cudaGetLastError(), "add_bias_bf16 launch failed");
 }

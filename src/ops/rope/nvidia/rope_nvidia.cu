@@ -21,6 +21,7 @@
 
 #include "rope_nvidia.hpp"
 #include "../../../utils.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -139,21 +140,21 @@ void launch_rope(
 
     switch (dtype) {
     case LLAISYS_DTYPE_F32:
-        rope_kernel<<<blocks, THREADS>>>(
+        rope_kernel<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<float*>(out_ptr),
             reinterpret_cast<const float*>(in_ptr),
             pos_ids_ptr, seq_len, n_heads, head_dim, theta
         );
         break;
     case LLAISYS_DTYPE_F16:
-        rope_kernel<<<blocks, THREADS>>>(
+        rope_kernel<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::fp16_t*>(out_ptr),
             reinterpret_cast<const llaisys::fp16_t*>(in_ptr),
             pos_ids_ptr, seq_len, n_heads, head_dim, theta
         );
         break;
     case LLAISYS_DTYPE_BF16:
-        rope_kernel<<<blocks, THREADS>>>(
+        rope_kernel<<<blocks, THREADS, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::bf16_t*>(out_ptr),
             reinterpret_cast<const llaisys::bf16_t*>(in_ptr),
             pos_ids_ptr, seq_len, n_heads, head_dim, theta

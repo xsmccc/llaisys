@@ -30,6 +30,7 @@
 #include "add_nvidia.hpp"
 
 #include "../../../utils.hpp"
+#include "../../../core/context/context.hpp"
 
 #include <cuda_runtime.h>   // CUDA 运行时 API (cudaGetLastError, cudaGetErrorString 等)
 #include <cuda_fp16.h>      // FP16/half 类型支持 (__half, __half2, __hadd, __hadd2)
@@ -322,7 +323,7 @@ void launch_add_kernel(std::byte *c, const std::byte *a, const std::byte *b, lla
     
     switch (type) {
     case LLAISYS_DTYPE_F32: {
-        add_kernel_f32_vec<<<blocks, threads>>>(
+        add_kernel_f32_vec<<<blocks, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<float *>(c),
             reinterpret_cast<const float *>(a),
             reinterpret_cast<const float *>(b),
@@ -331,7 +332,7 @@ void launch_add_kernel(std::byte *c, const std::byte *a, const std::byte *b, lla
         break;
     }
     case LLAISYS_DTYPE_F16: {
-        add_kernel_f16_vec<<<blocks, threads>>>(
+        add_kernel_f16_vec<<<blocks, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             reinterpret_cast<llaisys::fp16_t *>(c),
             reinterpret_cast<const llaisys::fp16_t *>(a),
             reinterpret_cast<const llaisys::fp16_t *>(b),
@@ -340,7 +341,7 @@ void launch_add_kernel(std::byte *c, const std::byte *a, const std::byte *b, lla
         break;
     }
     case LLAISYS_DTYPE_BF16: {
-        add_kernel_bf16_vec<<<blocks, threads>>>(
+        add_kernel_bf16_vec<<<blocks, threads, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
             
             reinterpret_cast<llaisys::bf16_t *>(c),
             reinterpret_cast<const llaisys::bf16_t *>(a),
