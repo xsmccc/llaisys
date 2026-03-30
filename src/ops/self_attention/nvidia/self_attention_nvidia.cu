@@ -548,14 +548,16 @@ __global__ void flash_decoding_partial_kernel(
     size_t kv_head,
     size_t head_dim,
     size_t v_head_dim,
-    float scale
+    float scale,
+    const size_t* d_total_len = nullptr   // device pointer (static graph capture)
 ) {
+    const size_t actual_total_len = d_total_len ? *d_total_len : total_len;
     const size_t split_id = blockIdx.x;
     const size_t h        = blockIdx.y;
     const size_t kv_h     = h / (nhead / kv_head);
 
     const size_t kv_start = split_id * FD_CHUNK_SIZE;
-    const size_t kv_end   = min(kv_start + (size_t)FD_CHUNK_SIZE, total_len);
+    const size_t kv_end   = min(kv_start + (size_t)FD_CHUNK_SIZE, actual_total_len);
     const int    kv_len   = (int)(kv_end - kv_start);
 
     if (kv_len <= 0) {
@@ -659,9 +661,14 @@ __global__ void flash_decoding_reduce_kernel(
     const float* __restrict__ partial_l,   // [num_splits, nhead]
     size_t num_splits,
     size_t nhead,
-    size_t v_head_dim
+    size_t v_head_dim,
+    const size_t* d_total_len = nullptr   // device pointer (static graph capture)
 ) {
     const size_t h = blockIdx.x;
+    // When d_total_len is set, compute actual num_splits from runtime total_len
+    const size_t actual_splits = d_total_len
+        ? ((*d_total_len + FD_CHUNK_SIZE - 1) / FD_CHUNK_SIZE)
+        : num_splits;
 
     extern __shared__ char smem_bytes[];
     float* warp_buf = reinterpret_cast<float*>(smem_bytes);
@@ -671,7 +678,7 @@ __global__ void flash_decoding_reduce_kernel(
 
     // Global max across splits
     float local_max = -INFINITY;
-    for (size_t s = threadIdx.x; s < num_splits; s += blockDim.x)
+    for (size_t s = threadIdx.x; s < actual_splits; s += blockDim.x)
         local_max = fmaxf(local_max, partial_m[s * nhead + h]);
     local_max = block_reduce_max(local_max, warp_buf);
     if (threadIdx.x == 0) s_global_max = local_max;
@@ -680,7 +687,7 @@ __global__ void flash_decoding_reduce_kernel(
 
     // Rescaled sum
     float local_sum = 0.0f;
-    for (size_t s = threadIdx.x; s < num_splits; s += blockDim.x)
+    for (size_t s = threadIdx.x; s < actual_splits; s += blockDim.x)
         local_sum += expf(partial_m[s * nhead + h] - global_max) * partial_l[s * nhead + h];
     local_sum = block_reduce_sum(local_sum, warp_buf);
     if (threadIdx.x == 0) s_global_sum = local_sum;
@@ -691,7 +698,7 @@ __global__ void flash_decoding_reduce_kernel(
     T* out = attn_val + h * v_head_dim;
     for (size_t dv = threadIdx.x; dv < v_head_dim; dv += blockDim.x) {
         float val = 0.0f;
-        for (size_t s = 0; s < num_splits; s++) {
+        for (size_t s = 0; s < actual_splits; s++) {
             float rescale = expf(partial_m[s * nhead + h] - global_max);
             val += rescale * partial_O[(s * nhead + h) * v_head_dim + dv];
         }
@@ -993,7 +1000,7 @@ void self_attention(
     // ---
     //  FlashDecoding: decode (seq_len=1) + long enough KV
     // ---
-    if (seq_len == 1 && total_len > (size_t)FD_CHUNK_SIZE && d_total_len == nullptr) {
+    if (seq_len == 1 && total_len > (size_t)FD_CHUNK_SIZE) {
         size_t num_splits = (total_len + FD_CHUNK_SIZE - 1) / FD_CHUNK_SIZE;
         ensure_fd_workspace(num_splits, nhead, v_head_dim);
 
@@ -1010,21 +1017,21 @@ void self_attention(
                 partial_O, partial_m, partial_l,
                 reinterpret_cast<const float*>(q), reinterpret_cast<const float*>(k),
                 reinterpret_cast<const float*>(v),
-                total_len, nhead, kv_head, head_dim, v_head_dim, scale);
+                total_len, nhead, kv_head, head_dim, v_head_dim, scale, d_total_len);
             break;
         case LLAISYS_DTYPE_F16:
             flash_decoding_partial_kernel<__half><<<partial_grid, threads, partial_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 partial_O, partial_m, partial_l,
                 reinterpret_cast<const __half*>(q), reinterpret_cast<const __half*>(k),
                 reinterpret_cast<const __half*>(v),
-                total_len, nhead, kv_head, head_dim, v_head_dim, scale);
+                total_len, nhead, kv_head, head_dim, v_head_dim, scale, d_total_len);
             break;
         case LLAISYS_DTYPE_BF16:
             flash_decoding_partial_kernel<__nv_bfloat16><<<partial_grid, threads, partial_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 partial_O, partial_m, partial_l,
                 reinterpret_cast<const __nv_bfloat16*>(q), reinterpret_cast<const __nv_bfloat16*>(k),
                 reinterpret_cast<const __nv_bfloat16*>(v),
-                total_len, nhead, kv_head, head_dim, v_head_dim, scale);
+                total_len, nhead, kv_head, head_dim, v_head_dim, scale, d_total_len);
             break;
         default: EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
         }
@@ -1037,17 +1044,17 @@ void self_attention(
         case LLAISYS_DTYPE_F32:
             flash_decoding_reduce_kernel<float><<<reduce_grid, threads, reduce_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<float*>(attn_val_ptr), partial_O, partial_m, partial_l,
-                num_splits, nhead, v_head_dim);
+                num_splits, nhead, v_head_dim, d_total_len);
             break;
         case LLAISYS_DTYPE_F16:
             flash_decoding_reduce_kernel<__half><<<reduce_grid, threads, reduce_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<__half*>(attn_val_ptr), partial_O, partial_m, partial_l,
-                num_splits, nhead, v_head_dim);
+                num_splits, nhead, v_head_dim, d_total_len);
             break;
         case LLAISYS_DTYPE_BF16:
             flash_decoding_reduce_kernel<__nv_bfloat16><<<reduce_grid, threads, reduce_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<__nv_bfloat16*>(attn_val_ptr), partial_O, partial_m, partial_l,
-                num_splits, nhead, v_head_dim);
+                num_splits, nhead, v_head_dim, d_total_len);
             break;
         default: EXCEPTION_UNSUPPORTED_DATATYPE(dtype);
         }

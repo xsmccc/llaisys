@@ -93,10 +93,14 @@ public:
                 // Allocate device buffers for static capture params
                 cudaMalloc(&d_start_pos_, sizeof(size_t));
                 cudaMalloc(&d_total_len_, sizeof(size_t));
-                // Max total_len for fused attention path (scores[total_len] in smem)
-                // Must stay under: (total_len + WARPS + head_dim) * 4 + static_smem < 48KB
-                // 8192 tokens × (Q+KV compute) is plenty for typical inference
-                graph_max_total_len_ = 8192;
+                // Pinned host memory for async H2D (avoids cudaMemcpy sync stalls)
+                cudaMallocHost(&h_start_pos_pinned_, sizeof(size_t));
+                cudaMallocHost(&h_total_len_pinned_, sizeof(size_t));
+                cudaMallocHost(&h_token_pinned_, sizeof(int64_t));
+                cudaMallocHost(&h_pos_pinned_, sizeof(int64_t));
+                // FlashDecoding supports d_total_len → no smem limit on total_len
+                // graph_max_total_len sets grid dims (idle blocks early-return)
+                graph_max_total_len_ = config_.max_position_embeddings;
                 std::cerr << "[Qwen2] CUDA Graph enabled (static capture, max_total_len="
                           << graph_max_total_len_ << ")" << std::endl;
             }
@@ -109,6 +113,10 @@ public:
         if (decode_graph_) { decode_graph_->printStats(); decode_graph_.reset(); }
         if (d_start_pos_) { cudaFree(d_start_pos_); d_start_pos_ = nullptr; }
         if (d_total_len_) { cudaFree(d_total_len_); d_total_len_ = nullptr; }
+        if (h_start_pos_pinned_) { cudaFreeHost(h_start_pos_pinned_); h_start_pos_pinned_ = nullptr; }
+        if (h_total_len_pinned_) { cudaFreeHost(h_total_len_pinned_); h_total_len_pinned_ = nullptr; }
+        if (h_token_pinned_) { cudaFreeHost(h_token_pinned_); h_token_pinned_ = nullptr; }
+        if (h_pos_pinned_) { cudaFreeHost(h_pos_pinned_); h_pos_pinned_ = nullptr; }
 #endif
         free_weight_arrays();
         // 清理 FP16 权重缓存和 FlashDecoding workspace
@@ -133,14 +141,6 @@ public:
 
         prepare_for_seq_len(ntoken);
 
-        // ── H2D loads (sync, outside graph capture) ──
-        ws_token_->load(token_ids);
-
-        std::vector<int64_t> positions(ntoken);
-        for (size_t i = 0; i < ntoken; ++i)
-            positions[i] = static_cast<int64_t>(current_pos_ + i);
-        ws_pos_->load(positions.data());
-
         // ── Forward pass ──
         size_t saved_pos = current_pos_;
 #ifdef ENABLE_NVIDIA_API
@@ -150,10 +150,18 @@ public:
             size_t hint = graph_max_total_len_;
             decode_graph_->staticLaunch(stream,
                 [&]() {
-                    // Setup: H2D copies of changing params (NOT captured)
-                    cudaMemcpyAsync(d_start_pos_, &saved_pos, sizeof(size_t),
+                    // Setup: ALL H2D copies via pinned memory + async (NOT captured)
+                    *h_token_pinned_ = token_ids[0];
+                    *h_pos_pinned_ = static_cast<int64_t>(saved_pos);
+                    *h_start_pos_pinned_ = saved_pos;
+                    *h_total_len_pinned_ = total_len;
+                    cudaMemcpyAsync(ws_token_->data(), h_token_pinned_, sizeof(int64_t),
                                     cudaMemcpyHostToDevice, stream);
-                    cudaMemcpyAsync(d_total_len_, &total_len, sizeof(size_t),
+                    cudaMemcpyAsync(ws_pos_->data(), h_pos_pinned_, sizeof(int64_t),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaMemcpyAsync(d_start_pos_, h_start_pos_pinned_, sizeof(size_t),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaMemcpyAsync(d_total_len_, h_total_len_pinned_, sizeof(size_t),
                                     cudaMemcpyHostToDevice, stream);
                 },
                 [&]() {
@@ -170,6 +178,12 @@ public:
         } else
 #endif
         {
+            ws_token_->load(token_ids);
+            std::vector<int64_t> positions(ntoken);
+            for (size_t i = 0; i < ntoken; ++i)
+                positions[i] = static_cast<int64_t>(current_pos_ + i);
+            ws_pos_->load(positions.data());
+
             embed_.forward(ws_hidden_, ws_token_);
             tensor_t current = ws_hidden_;
             for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
@@ -206,14 +220,6 @@ public:
 
         prepare_for_seq_len(ntoken);
 
-        // ── H2D loads (sync, outside graph capture) ──
-        ws_token_->load(token_ids);
-
-        std::vector<int64_t> positions(ntoken);
-        for (size_t i = 0; i < ntoken; ++i)
-            positions[i] = static_cast<int64_t>(current_pos_ + i);
-        ws_pos_->load(positions.data());
-
         // ── Forward pass ──
         size_t saved_pos = current_pos_;
         bool is_greedy = (temperature <= 0.0f) || (top_k == 1) ||
@@ -226,9 +232,18 @@ public:
             size_t hint = graph_max_total_len_;
             decode_graph_->staticLaunch(stream,
                 [&]() {
-                    cudaMemcpyAsync(d_start_pos_, &saved_pos, sizeof(size_t),
+                    // Setup: ALL H2D via pinned memory + async (NOT captured)
+                    *h_token_pinned_ = token_ids[0];
+                    *h_pos_pinned_ = static_cast<int64_t>(saved_pos);
+                    *h_start_pos_pinned_ = saved_pos;
+                    *h_total_len_pinned_ = total_len;
+                    cudaMemcpyAsync(ws_token_->data(), h_token_pinned_, sizeof(int64_t),
                                     cudaMemcpyHostToDevice, stream);
-                    cudaMemcpyAsync(d_total_len_, &total_len, sizeof(size_t),
+                    cudaMemcpyAsync(ws_pos_->data(), h_pos_pinned_, sizeof(int64_t),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaMemcpyAsync(d_start_pos_, h_start_pos_pinned_, sizeof(size_t),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaMemcpyAsync(d_total_len_, h_total_len_pinned_, sizeof(size_t),
                                     cudaMemcpyHostToDevice, stream);
                 },
                 [&]() {
@@ -259,6 +274,14 @@ public:
             return output_token;
         }
 #endif
+
+        ws_token_->load(token_ids);
+        {
+            std::vector<int64_t> positions(ntoken);
+            for (size_t i = 0; i < ntoken; ++i)
+                positions[i] = static_cast<int64_t>(current_pos_ + i);
+            ws_pos_->load(positions.data());
+        }
 
         embed_.forward(ws_hidden_, ws_token_);
 
@@ -335,7 +358,12 @@ private:
     // Static capture: device buffers for graph-invariant parameters
     size_t* d_start_pos_ = nullptr;   // device pointer
     size_t* d_total_len_ = nullptr;   // device pointer
-    size_t graph_max_total_len_ = 0;  // fused path threshold
+    size_t graph_max_total_len_ = 0;  // FlashDecoding grid dim limit
+    // Pinned host memory for async H2D (no default-stream sync stall)
+    size_t* h_start_pos_pinned_ = nullptr;
+    size_t* h_total_len_pinned_ = nullptr;
+    int64_t* h_token_pinned_ = nullptr;
+    int64_t* h_pos_pinned_ = nullptr;
 #endif
 
     void prepare_for_seq_len(size_t seq_len) {
