@@ -799,6 +799,7 @@ void self_attention(
     // ─────────────────────────────────────────────────────────
     if (seq_len > 1 && seq_len * total_len > 128 * 128) {
         cublasHandle_t cublas_handle = get_cublas_handle();
+        cublasSetStream(cublas_handle, (cudaStream_t)llaisys::core::context().runtime().stream());
         const size_t group_size = nhead / kv_head;
 
         // Workspace: scores [nhead, seq_len, total_len] in F32
@@ -931,7 +932,7 @@ void self_attention(
                 DT* scores_T = reinterpret_cast<DT*>(
                     reinterpret_cast<char*>(scores) + scores_count * sizeof(float));
                 size_t cvt_blocks = (scores_count + 255) / 256;
-                convert_f32_to_T_kernel<DT><<<cvt_blocks, 256>>>(scores_T, scores, scores_count);
+                convert_f32_to_T_kernel<DT><<<cvt_blocks, 256, 0, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(scores_T, scores, scores_count);
 
                 const DT* V_ptr = reinterpret_cast<const DT*>(v);
                 DT* O_ptr = reinterpret_cast<DT*>(attn_val_ptr);
@@ -1002,21 +1003,21 @@ void self_attention(
 
         switch (dtype) {
         case LLAISYS_DTYPE_F32:
-            flash_decoding_partial_kernel<float><<<partial_grid, threads, partial_smem>>>(
+            flash_decoding_partial_kernel<float><<<partial_grid, threads, partial_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 partial_O, partial_m, partial_l,
                 reinterpret_cast<const float*>(q), reinterpret_cast<const float*>(k),
                 reinterpret_cast<const float*>(v),
                 total_len, nhead, kv_head, head_dim, v_head_dim, scale);
             break;
         case LLAISYS_DTYPE_F16:
-            flash_decoding_partial_kernel<__half><<<partial_grid, threads, partial_smem>>>(
+            flash_decoding_partial_kernel<__half><<<partial_grid, threads, partial_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 partial_O, partial_m, partial_l,
                 reinterpret_cast<const __half*>(q), reinterpret_cast<const __half*>(k),
                 reinterpret_cast<const __half*>(v),
                 total_len, nhead, kv_head, head_dim, v_head_dim, scale);
             break;
         case LLAISYS_DTYPE_BF16:
-            flash_decoding_partial_kernel<__nv_bfloat16><<<partial_grid, threads, partial_smem>>>(
+            flash_decoding_partial_kernel<__nv_bfloat16><<<partial_grid, threads, partial_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 partial_O, partial_m, partial_l,
                 reinterpret_cast<const __nv_bfloat16*>(q), reinterpret_cast<const __nv_bfloat16*>(k),
                 reinterpret_cast<const __nv_bfloat16*>(v),
@@ -1031,17 +1032,17 @@ void self_attention(
 
         switch (dtype) {
         case LLAISYS_DTYPE_F32:
-            flash_decoding_reduce_kernel<float><<<reduce_grid, threads, reduce_smem>>>(
+            flash_decoding_reduce_kernel<float><<<reduce_grid, threads, reduce_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<float*>(attn_val_ptr), partial_O, partial_m, partial_l,
                 num_splits, nhead, v_head_dim);
             break;
         case LLAISYS_DTYPE_F16:
-            flash_decoding_reduce_kernel<__half><<<reduce_grid, threads, reduce_smem>>>(
+            flash_decoding_reduce_kernel<__half><<<reduce_grid, threads, reduce_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<__half*>(attn_val_ptr), partial_O, partial_m, partial_l,
                 num_splits, nhead, v_head_dim);
             break;
         case LLAISYS_DTYPE_BF16:
-            flash_decoding_reduce_kernel<__nv_bfloat16><<<reduce_grid, threads, reduce_smem>>>(
+            flash_decoding_reduce_kernel<__nv_bfloat16><<<reduce_grid, threads, reduce_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<__nv_bfloat16*>(attn_val_ptr), partial_O, partial_m, partial_l,
                 num_splits, nhead, v_head_dim);
             break;
@@ -1073,7 +1074,7 @@ void self_attention(
                               + Bc_val * head_dim * sizeof(DT)          // s_k
                               + Bc_val * v_head_dim * sizeof(DT)        // s_v
                               + (WARPS + Bc_val) * sizeof(float);       // warp_buf + tile_scores
-            flash_attention_kernel<DT, Bc_val><<<grid, threads, flash_smem>>>(
+            flash_attention_kernel<DT, Bc_val><<<grid, threads, flash_smem, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<DT*>(attn_val_ptr),
                 reinterpret_cast<const DT*>(q),
                 reinterpret_cast<const DT*>(k),
@@ -1095,7 +1096,7 @@ void self_attention(
 
         switch (dtype) {
         case LLAISYS_DTYPE_F32:
-            self_attention_fused<float><<<grid, threads, smem_size>>>(
+            self_attention_fused<float><<<grid, threads, smem_size, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<float*>(attn_val_ptr),
                 reinterpret_cast<const float*>(q),
                 reinterpret_cast<const float*>(k),
@@ -1104,7 +1105,7 @@ void self_attention(
             );
             break;
         case LLAISYS_DTYPE_F16:
-            self_attention_fused<__half><<<grid, threads, smem_size>>>(
+            self_attention_fused<__half><<<grid, threads, smem_size, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<__half*>(attn_val_ptr),
                 reinterpret_cast<const __half*>(q),
                 reinterpret_cast<const __half*>(k),
@@ -1113,7 +1114,7 @@ void self_attention(
             );
             break;
         case LLAISYS_DTYPE_BF16:
-            self_attention_fused<__nv_bfloat16><<<grid, threads, smem_size>>>(
+            self_attention_fused<__nv_bfloat16><<<grid, threads, smem_size, (cudaStream_t)llaisys::core::context().runtime().stream()>>>(
                 reinterpret_cast<__nv_bfloat16*>(attn_val_ptr),
                 reinterpret_cast<const __nv_bfloat16*>(q),
                 reinterpret_cast<const __nv_bfloat16*>(k),

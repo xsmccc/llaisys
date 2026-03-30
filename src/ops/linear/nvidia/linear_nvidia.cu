@@ -293,6 +293,7 @@ void linear_f32(
     size_t rows           // M
 ) {
     cublasHandle_t handle = get_cublas_handle();
+    cublasSetStream(handle, (cudaStream_t)llaisys::core::context().runtime().stream());
     const float alpha = 1.0f;
     const float beta  = 0.0f;
 
@@ -351,6 +352,7 @@ void linear_f16(
     size_t rows
 ) {
     cublasHandle_t handle = get_cublas_handle();
+    cublasSetStream(handle, (cudaStream_t)llaisys::core::context().runtime().stream());
 
     // 用 F32 累加以匹配 PyTorch 默认行为，提高精度
     const float alpha = 1.0f;
@@ -396,6 +398,7 @@ void linear_bf16(
     size_t rows
 ) {
     cublasHandle_t handle = get_cublas_handle();
+    cublasSetStream(handle, (cudaStream_t)llaisys::core::context().runtime().stream());
 
     // BF16 GEMM 用 F32 累加精度更高
     const float alpha = 1.0f;

@@ -109,10 +109,10 @@ llaisysStream_t Runtime::stream() const {
 }
 
 // 等待流上的所有任务完成
-// 注：当前所有 CUDA kernel 和 cuBLAS 都使用默认 stream (0)，
-// 而 runtime 创建的 stream 未被使用，因此这里用 device_synchronize 来确保同步。
+// 所有 CUDA kernel 和 cuBLAS 现已统一使用 runtime stream，
+// 因此使用 stream_synchronize 替代 device_synchronize 以精确同步。
 void Runtime::synchronize() const {
-    _api->device_synchronize();
+    _api->stream_synchronize(_stream);
 }
 
 } // namespace llaisys::core

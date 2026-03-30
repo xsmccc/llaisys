@@ -33,9 +33,16 @@ class Qwen2:
         """
         self.model_path = Path(model_path)
         self.device = device
+        self._kept_references = []
+
+        # Auto-detect quantization from model files
+        if not quantized and not int4:
+            if (Path(model_path) / 'quantized_weights_int4.npz').exists():
+                int4 = True
+            elif (Path(model_path) / 'quantized_weights.npz').exists():
+                quantized = True
         self.quantized = quantized
         self.int4 = int4
-        self._kept_references = []
 
         config_path = self.model_path / "config.json"
         if not config_path.exists():

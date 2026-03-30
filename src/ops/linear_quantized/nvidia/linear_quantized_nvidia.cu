@@ -464,6 +464,7 @@ void linear_quantized_impl(
     llaisysDataType_t bias_dtype
 ) {
     cublasHandle_t handle = get_cublas_handle();
+    cublasSetStream(handle, (cudaStream_t)llaisys::core::context().runtime().stream());
 
     if (get_sm_version() >= 70) {
         // 获取 FP16 输入指针
@@ -554,6 +555,7 @@ void linear_quantized_int4_impl(
     llaisysDataType_t bias_dtype
 ) {
     cublasHandle_t handle = get_cublas_handle();
+    cublasSetStream(handle, (cudaStream_t)llaisys::core::context().runtime().stream());
     size_t K_packed = K_orig / 2;
 
     // 获取 FP16 输入指针

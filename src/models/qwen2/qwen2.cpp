@@ -8,6 +8,7 @@
 #include "../../core/llaisys_core.hpp"
 #include "../../ops/linear_quantized/nvidia/linear_quantized_nvidia.hpp"
 #include "../../ops/self_attention/nvidia/self_attention_nvidia.hpp"
+#include "cuda_graph_manager.hpp"
 #include <vector>
 #include <memory>
 #include <iostream>
@@ -82,9 +83,23 @@ public:
         init_weight_arrays(config_.num_hidden_layers);
         std::cerr << "[Qwen2] Model created with " << config_.num_hidden_layers
                   << " layers, hidden_size=" << config_.hidden_size << std::endl;
+
+#ifdef ENABLE_NVIDIA_API
+        if (config_.device_type == LLAISYS_DEVICE_NVIDIA) {
+            const char* graph_env = std::getenv("LLAISYS_CUDA_GRAPH");
+            if (graph_env && std::string(graph_env) == "1") {
+                decode_graph_ = std::make_unique<llaisys::models::qwen2::CudaGraphManager>();
+                cuda_graph_enabled_ = true;
+                std::cerr << "[Qwen2] CUDA Graph enabled for decode" << std::endl;
+            }
+        }
+#endif
     }
 
     ~Qwen2Model() {
+#ifdef ENABLE_NVIDIA_API
+        if (decode_graph_) { decode_graph_->printStats(); decode_graph_.reset(); }
+#endif
         free_weight_arrays();
         // 清理 FP16 权重缓存和 FlashDecoding workspace
 #ifdef ENABLE_NVIDIA_API
@@ -108,29 +123,45 @@ public:
 
         prepare_for_seq_len(ntoken);
 
+        // ── H2D loads (sync, outside graph capture) ──
         ws_token_->load(token_ids);
-        embed_.forward(ws_hidden_, ws_token_);
 
         std::vector<int64_t> positions(ntoken);
         for (size_t i = 0; i < ntoken; ++i)
             positions[i] = static_cast<int64_t>(current_pos_ + i);
         ws_pos_->load(positions.data());
 
-        tensor_t current = ws_hidden_;
-        for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
-            current = layers_[layer_idx].forward(current, current_pos_, ws_pos_);
-
-        final_norm_.forward(ws_final_norm_, current);
+        // ── Forward pass ──
+        size_t saved_pos = current_pos_;
+#ifdef ENABLE_NVIDIA_API
+        if (cuda_graph_enabled_ && ntoken == 1) {
+            cudaStream_t stream = (cudaStream_t)core::context().runtime().stream();
+            decode_graph_->captureAndLaunch(stream, [&]() {
+                embed_.forward(ws_hidden_, ws_token_);
+                tensor_t current = ws_hidden_;
+                for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
+                    current = layers_[layer_idx].forward(current, saved_pos, ws_pos_);
+                final_norm_.forward(ws_final_norm_, current);
+                lm_head_.forward(ws_logits_, ws_final_norm_);
+                ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
+            });
+        } else
+#endif
+        {
+            embed_.forward(ws_hidden_, ws_token_);
+            tensor_t current = ws_hidden_;
+            for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
+                current = layers_[layer_idx].forward(current, saved_pos, ws_pos_);
+            final_norm_.forward(ws_final_norm_, current);
+            tensor_t last_hidden = (ntoken > 1)
+                ? ws_final_norm_->slice(0, ntoken - 1, ntoken)
+                : ws_final_norm_;
+            lm_head_.forward(ws_logits_, last_hidden);
+            ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
+        }
         current_pos_ += ntoken;
 
-        // LM Head 只算最后一个 token
-        tensor_t last_hidden = (ntoken > 1)
-            ? ws_final_norm_->slice(0, ntoken - 1, ntoken)
-            : ws_final_norm_;
-        lm_head_.forward(ws_logits_, last_hidden);
-
-        ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
-
+        // ── D2H output (sync, outside graph) ──
         int64_t output_token = 0;
         if (config_.device_type != LLAISYS_DEVICE_CPU) {
             const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(config_.device_type);
@@ -153,17 +184,55 @@ public:
 
         prepare_for_seq_len(ntoken);
 
+        // ── H2D loads (sync, outside graph capture) ──
         ws_token_->load(token_ids);
-        embed_.forward(ws_hidden_, ws_token_);
 
         std::vector<int64_t> positions(ntoken);
         for (size_t i = 0; i < ntoken; ++i)
             positions[i] = static_cast<int64_t>(current_pos_ + i);
         ws_pos_->load(positions.data());
 
+        // ── Forward pass ──
+        size_t saved_pos = current_pos_;
+        bool is_greedy = (temperature <= 0.0f) || (top_k == 1) ||
+                         (temperature == 1.0f && top_k <= 0 && top_p >= 1.0f);
+
+#ifdef ENABLE_NVIDIA_API
+        if (cuda_graph_enabled_ && ntoken == 1) {
+            cudaStream_t stream = (cudaStream_t)core::context().runtime().stream();
+            decode_graph_->captureAndLaunch(stream, [&]() {
+                embed_.forward(ws_hidden_, ws_token_);
+                tensor_t current = ws_hidden_;
+                for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
+                    current = layers_[layer_idx].forward(current, saved_pos, ws_pos_);
+                final_norm_.forward(ws_final_norm_, current);
+                lm_head_.forward(ws_logits_, ws_final_norm_);
+                ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
+            });
+            current_pos_ += ntoken;
+
+            int64_t output_token = 0;
+            const LlaisysRuntimeAPI* api = llaisysGetRuntimeAPI(config_.device_type);
+            core::context().runtime().synchronize();
+            if (is_greedy) {
+                api->memcpy_sync(&output_token, ws_out_idx_->data(), sizeof(int64_t), LLAISYS_MEMCPY_D2H);
+            } else {
+                size_t vocab_size = config_.vocab_size;
+                std::vector<float> logits(vocab_size);
+                api->memcpy_sync(logits.data(), ws_logits_->data(),
+                                 vocab_size * sizeof(float), LLAISYS_MEMCPY_D2H);
+                output_token = sample_token(logits.data(), vocab_size,
+                                            temperature, top_k, top_p, seed);
+            }
+            return output_token;
+        }
+#endif
+
+        embed_.forward(ws_hidden_, ws_token_);
+
         tensor_t current = ws_hidden_;
         for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx)
-            current = layers_[layer_idx].forward(current, current_pos_, ws_pos_);
+            current = layers_[layer_idx].forward(current, saved_pos, ws_pos_);
 
         final_norm_.forward(ws_final_norm_, current);
         current_pos_ += ntoken;
@@ -174,8 +243,6 @@ public:
         lm_head_.forward(ws_logits_, last_hidden);
 
         int64_t output_token = 0;
-        bool is_greedy = (temperature <= 0.0f) || (top_k == 1) ||
-                         (temperature == 1.0f && top_k <= 0 && top_p >= 1.0f);
 
         if (is_greedy && top_k == 1) {
             ops::argmax(ws_out_idx_, ws_out_val_, ws_logits_);
@@ -207,7 +274,12 @@ public:
         return output_token;
     }
 
-    void reset() { current_pos_ = 0; }
+    void reset() {
+        current_pos_ = 0;
+#ifdef ENABLE_NVIDIA_API
+        if (decode_graph_) decode_graph_->reset();
+#endif
+    }
 
 private:
     Qwen2Config config_;
@@ -221,9 +293,14 @@ private:
     size_t current_pos_ = 0;
     size_t current_ws_seq_len_ = 0;
     bool weights_distributed_ = false;
+    bool cuda_graph_enabled_ = false;
 
     tensor_t ws_token_, ws_pos_, ws_hidden_, ws_final_norm_;
     tensor_t ws_logits_, ws_out_idx_, ws_out_val_;
+
+#ifdef ENABLE_NVIDIA_API
+    std::unique_ptr<llaisys::models::qwen2::CudaGraphManager> decode_graph_;
+#endif
 
     void prepare_for_seq_len(size_t seq_len) {
         if (seq_len == current_ws_seq_len_) return;
