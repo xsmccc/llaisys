@@ -152,7 +152,7 @@ PyTorch `torch.nn.functional.scaled_dot_product_attention` 对照：
 
 ### 3.1 性能问题根因分析
 
-原始 INT8 实现仅 **0.4 tok/s** (FP32 基线 34 tok/s)。通过系统性分析定位根因：
+原始 INT8 实现仅 **0.4 tok/s** (FP32 基线 ~30 tok/s)。通过系统性分析定位根因：
 
 | 层次 | 问题 | 影响 |
 |------|------|------|
@@ -195,13 +195,14 @@ __global__ void dequant_int8_to_fp16_vec4(const int8_t* in, half* out,
 
 | 阶段 | tok/s | vs FP32 | 措施 |
 |------|------:|------:|------|
-| FP32 基线 | 14 | 1.0× | FP32 权重 + cublasSgemm |
-| 原始 INT8 | 0.4 | 0.03× (bug) | 逐次 malloc + dequant → FP32 → cublasSgemm |
-| +CachingAllocator | 2.6 | 0.19× | 消除 cudaMalloc 同步开销 |
-| +FP16 Tensor Core | 3.2 | 0.23× | cublasGemmEx + CUBLAS_COMPUTE_32F |
-| +持久权重缓存 | **57.5** | **4.1×** | dequant once → hash 查找复用 ← 根因修复 |
-| +FP16 全计算管线 | 76 | 5.4× | embedding/norm/activation 全链路 FP16 |
-| +KV Cache INT8 | **90** | **6.4×** | 正交量化叠加 |
+| FP32 基线 | ~30 | 1.0× | FP32 权重 + cublasSgemm |
+| 原始 INT8 | 0.4 | 0.01× (bug) | 逐次 malloc + dequant → FP32 → cublasSgemm |
+| +CachingAllocator | 2.6 | 0.09× | 消除 cudaMalloc 同步开销 |
+| +FP16 Tensor Core | 3.2 | 0.11× | cublasGemmEx + CUBLAS_COMPUTE_32F |
+| +持久权重缓存 | **57.5** | **1.9×** | dequant once → hash 查找复用 ← 根因修复 |
+| +FP16 全计算管线 | 76 | 2.5× | embedding/norm/activation 全链路 FP16 |
+| +KV Cache INT8 | **~118** | **3.9×** | 正交量化叠加 |
+| +CUDA Graph 静态捕获 | **~132** | **4.4×** | 设备侧间接寻址 + Pinned H2D |
 
 ### 3.4 INT4 Group Quantization
 
@@ -268,9 +269,9 @@ KV Cache 在长序列推理中占据大量显存:
 | 配置 | tok/s | vs INT8 only |
 |------|------:|:-----------:|
 | INT8 (W8A16) | ~76 | — |
-| INT8 + KV INT8 | **~90** | **+19%** |
+| INT8 + KV INT8 | **~118** | **+55%** |
 
-> FP32 + KV INT8 在 8GB 卡上因 VRAM 压力反而变慢 (14→8 tok/s)，KV INT8 收益在权重已量化后才充分释放。
+> FP32 + KV INT8 在 8GB 卡上因 VRAM 压力反而变慢 (30→8 tok/s)，KV INT8 收益在权重已量化后才充分释放。
 
 **正确性**: INT8 + KV INT8 输出与 INT8-only 逐字符 **bit-identical** (greedy decode 验证)。
 **CUDA Graph 正确性**: FP32/INT8+KV8 图模式输出与非图模式 500 token 生成逐 token 完全一致。
@@ -418,9 +419,9 @@ if (warp_id == 0) {
 | Qwen2-1.5B | INT8 + KV INT8 (No Graph) | ~118 | 3.9× |
 | Qwen2-1.5B | **INT8 + KV INT8 + CUDA Graph** | **~132** | **4.4×** |
 | Qwen2-1.5B | INT8 + FP16 KV + CUDA Graph | ~134 | 4.5× |
-| Qwen2-1.5B | INT4 (W4A16) | ~33 | 2.4× |
+| Qwen2-1.5B | INT4 (W4A16) | ~33 | 1.1× |
 | LLaMA-3.2-1B | FP32 | ~40 | — |
-| HuggingFace (参考) | FP32/BF16 | ~32 | 0.35× |
+| HuggingFace (参考) | FP32/BF16 | ~32 | 1.1× |
 
 > 统计口径：100 token decode，warmup 后多轮平均。
 
