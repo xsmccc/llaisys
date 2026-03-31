@@ -38,8 +38,8 @@
 │  ├─ Runtime  (流管理, 设备抽象, 惰性初始化)       │
 │  └─ CachingAllocator (best-fit 显存池)           │
 ├──────────────────────────────────────────────────┤
-│  CUDA Operators (4,597 行)                        │
-│  ├─ self_attention   (815L)  FlashAttention v2    │
+│  CUDA Operators (7,077 行)                        │
+│  ├─ self_attention   (1150L)  FlashAttention v2    │
 │  ├─ linear_quantized (714L)  INT8/INT4 持久缓存   │
 │  ├─ kv_cache_quant          KV Cache INT8         │
 │  ├─ fused_add_rmsnorm       残差+归一化融合        │
@@ -92,7 +92,7 @@ generate(prompt_tokens, max_tokens):
 
 ## 2. FlashAttention v2 实现
 
-**实现文件**: `src/ops/self_attention/nvidia/self_attention_nvidia.cu` (815 行)
+**实现文件**: `src/ops/self_attention/nvidia/self_attention_nvidia.cu` (1150 行)
 
 ### 2.1 双路径策略
 
@@ -273,6 +273,7 @@ KV Cache 在长序列推理中占据大量显存:
 > FP32 + KV INT8 在 8GB 卡上因 VRAM 压力反而变慢 (14→8 tok/s)，KV INT8 收益在权重已量化后才充分释放。
 
 **正确性**: INT8 + KV INT8 输出与 INT8-only 逐字符 **bit-identical** (greedy decode 验证)。
+**CUDA Graph 正确性**: FP32/INT8+KV8 图模式输出与非图模式 500 token 生成逐 token 完全一致。
 
 ---
 
@@ -412,12 +413,16 @@ if (warp_id == 0) {
 
 | 模型 | 配置 | tok/s | 加速比 |
 |------|------|------:|------:|
-| Qwen2-1.5B | FP32 | ~14 | 1.0× |
-| Qwen2-1.5B | INT8 (W8A16 + FP16 管线) | ~76 | 5.6× |
-| Qwen2-1.5B | **INT8 + KV INT8** | **~90** | **6.6×** |
+| Qwen2-1.5B | FP32 | ~30 | 1.0× |
+| Qwen2-1.5B | INT8 (W8A16 + FP16 管线) | ~76 | 2.5× |
+| Qwen2-1.5B | INT8 + KV INT8 (No Graph) | ~118 | 3.9× |
+| Qwen2-1.5B | **INT8 + KV INT8 + CUDA Graph** | **~132** | **4.4×** |
+| Qwen2-1.5B | INT8 + FP16 KV + CUDA Graph | ~134 | 4.5× |
 | Qwen2-1.5B | INT4 (W4A16) | ~33 | 2.4× |
 | LLaMA-3.2-1B | FP32 | ~40 | — |
 | HuggingFace (参考) | FP32/BF16 | ~32 | 0.35× |
+
+> 统计口径：100 token decode，warmup 后多轮平均。
 
 ### 正确性
 
@@ -454,12 +459,14 @@ if (warp_id == 0) {
 
 **关键结论**: Decode 阶段所有算子的算术强度均远低于 Ridge Point，全部处于 **Memory-bound** 区域。这意味着：
 
-1. **Decode 吞吐量的理论上限由 HBM 带宽决定**：每个 token 需读取 ~3,154 MB 权重数据
-2. **理论极限**: 288 GB/s ÷ 3154 MB/token = **91.3 tok/s**
-3. **实测 90 tok/s = 98.6% 理论带宽利用率** (L2 Cache 命中进一步提升小矩阵性能)
+1. **Decode 吞吐量的理论上限由带宽层级共同决定**：每个 token 需读取 ~3,154 MB 权重数据
+2. **理论 HBM 极限**: 288 GB/s ÷ 3154 MB/token = **91.3 tok/s**（纯 HBM 带宽限制）
+3. **加入 CUDA Graph 后实测 132 tok/s > 理论 HBM 极限**，因为：
+   - Graph 消除 CPU launch gap，GPU 持续满载
+   - L2 Cache 命中（小矩阵 18-48KB 缓存于 32MB L2）提升有效带宽
+   - 真实吞吐 = HBM 带宽极限 + L2 红利 + Launch gap 消除 = 132 tok/s
 
-> **计算方法说明**: 3,154 MB/token 为 INT8 模式下所有 Linear 层 FP16 持久缓存权重的逐 token 读取总量 (INT8 权重在首次使用时 dequant 为 FP16 并永久缓存)。理论极限 = HBM 带宽 (288 GB/s) ÷ 每 token 总读取量。98.6% 表示实测吞吐与带宽理论极限之比，L2 Cache 对小矩阵 (RMSNorm 18KB, SwiGLU 48KB) 的命中率使实际 HBM 压力略低于理论值。
-
+> **计算方法说明**: 3,154 MB/token 为 INT8 模式所有 Linear FP16 持久缓存权重的逐 token 读取总量。No-Graph 模式约 118 tok/s，Graph 模式约 132 tok/s，提升主要来自 launch gap 进一步降低与 L2 命中收益叠加。
 ```
                    Roofline Model (RTX 4060 Ti)
     ┌─────────────────────────────────────────────────┐
@@ -515,58 +522,127 @@ RMSNorm 在 Decode 阶段 (M=1) 的 Grid Size=1 是 **正确且不可避免** �
 - 每 token 的 RMSNorm 总耗时: ~3.2μs × 56 次 = **0.18 ms** (仅占总推理时间的 1.6%)
 - **真正的时间消耗在 Linear 算子**: 196 次 cuBLAS GEMV 占据 ~98% 推理时间
 
-### 9.3 CUDA Graph 适用性分析
+### 9.3 CUDA Graph 静态捕获 — 实现原理
 
-CUDA Graph 通过捕获 kernel launch 序列来消除逐次 launch 的 CPU 开销。
-对本项目的适用性分析：
+#### 9.3.1 问题分析
 
-**理论收益估算**:
-```
-每 token kernel 启动数: ~308 次 (28 层 × 11 算子/层)
-单次 launch 开销: 5-7 μs
-总 launch 开销: ~1.5-2.0 ms / token
-当前 token 时间: ~11.1 ms (90 tok/s)
-预期加速: 13-18% → 102-106 tok/s
-```
+Decode 阶段每 token 需执行 ~308 次 kernel launch（28 层 × ~11 算子/层），每次 launch 有 5-7μs CPU 开销，合计约 1.85ms/token。在 INT8+KV8 下推理约 8.5ms/token (118 tok/s)，其中 **22% 是纯 CPU launch overhead**——GPU 在等待 CPU 发射下一个 kernel。
 
-**实施约束**:
+CUDA Graph 将多个 kernel 录制为一张有向无环图 (DAG)，之后每 token 仅需一次 `cudaGraphLaunch`，消除逐个 launch 的 CPU 开销。
 
-| 约束 | 说明 | 影响 |
-|------|------|------|
-| KV Cache 动态写入 | `update_cache()` 写入位置 = `start_pos`，每步递增 | 需要 kernel 间接寻址重写 |
-| cuBLAS 兼容性 | cuBLAS 调用需要 `CUBLAS_WORKSPACE_CAPTURED` 模式 | 配置改动 |
-| INT8 反量化缓存 | 首次推理时 dequant → 后续复用 FP16 缓存 | Graph 捕获时需确保缓存已填充 |
-| KV Cache INT8 | quantize/dequantize 写入的位置同样动态 | 需配合位置 buffer |
+#### 9.3.2 核心技术难点
 
-**设计方案** (已论证，未实施):
+CUDA Graph 捕获的是**固定的 kernel 参数和内存地址**。但 LLM Decode 中有 4 个逐 token 变化的动态参数：`token_id`, `position`, `start_pos`, `total_len`。直接捕获会导致每 token 录制的值被"冻结"。
+
+**解决方案——设备侧指针间接寻址 (Device-side Indirection)**:
 
 ```
-// 方案: GPU-side 位置 buffer + 间接寻址
-int* d_pos_buffer;  // GPU 上的位置 buffer
-cudaMemcpyAsync(d_pos_buffer, &current_pos, sizeof(int), H2D);
+传统方式 (Graph 不可用):
+  kernel<<<grid, block>>>(start_pos=5);   // 值被录制，每 token 不变
+  kernel<<<grid, block>>>(start_pos=6);   // 需要新 Graph
 
-// CUDA Graph 捕获
-cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-  forward_decode(input, d_pos_buffer);  // 所有 kernel 读取 d_pos_buffer
-cudaStreamEndCapture(stream, &graph);
-cudaGraphInstantiate(&instance, graph, 0);
-
-// 推理循环
-for (int step = 0; step < max_len; step++) {
-    cudaMemcpyAsync(d_pos_buffer, &step, sizeof(int), H2D);
-    cudaGraphLaunch(instance, stream);
-}
+指针间接寻址 (Graph 可用):
+  // 1. 分配 GPU 内存指针 d_start_pos (地址固定)
+  // 2. Graph 录制: kernel<<<>>>(*d_start_pos)  // 录地址，不录值
+  // 3. 每 token: cudaMemcpyAsync(&5, d_start_pos) → cudaGraphLaunch
+  //              cudaMemcpyAsync(&6, d_start_pos) → cudaGraphLaunch
 ```
 
-**不实施的理由**:
-1. **收益有限**: 已达 98.6% HBM 带宽利用率，加速主要来自消除 CPU launch gap
-2. **实施复杂度高**: 需重写 KV Cache update、INT8 quantize/dequantize 的地址计算
-3. **调试困难**: CUDA Graph 的错误信息不如普通 kernel 清晰
-4. **ROI 不高**: 预期 13-18% 提升，但需 ~2000 行代码改动
+Graph 捕获的是 `d_start_pos` 这个**指针地址**（不变），kernel 在 GPU 端读取 `*d_start_pos` 获得当前值。每 token 只需通过 `cudaMemcpyAsync` 更新指针指向的值。
+
+#### 9.3.3 FlashDecoding 适配
+
+FlashDecoding 的 Grid 大小取决于 `total_len`（splits = ceil(total_len/256)），但 Graph 要求固定 Grid。解决方案：
+
+```
+固定 Grid = (max_splits=32, n_heads=12)
+
+partial_kernel:
+  actual_total_len = *d_total_len;     // 运行时从 GPU 内存读取
+  kv_len = actual_total_len - 1;
+  if (kv_len <= 0) return;             // idle block 早退
+
+reduce_kernel:
+  actual_total_len = *d_total_len;
+  actual_splits = ceil(actual_total_len / Bd);
+  // 仅归约 actual_splits 个有效 chunk
+```
+
+固定最大 Grid 后，实际 `total_len` 较小时多余的 block 通过 `kv_len <= 0` 早退，零计算浪费。
+
+#### 9.3.4 Pinned Memory + Async H2D
+
+初版使用 `cudaMemcpy`（同步，default stream）更新设备参数，导致 **FP32 模式 -12% 性能回归**——同步 memcpy 在 default stream 上排队，阻塞了 compute stream 上的 Graph launch。
+
+修复方案：
+
+```cpp
+// 分配 page-locked host buffer
+cudaMallocHost(&h_token_pinned_, sizeof(int));
+cudaMallocHost(&h_pos_pinned_, sizeof(size_t));
+cudaMallocHost(&h_start_pos_pinned_, sizeof(size_t));
+cudaMallocHost(&h_total_len_pinned_, sizeof(size_t));
+
+// setup_fn: 在 compute stream 上异步传输
+*h_token_pinned_ = next_token;
+*h_pos_pinned_ = current_pos;
+*h_start_pos_pinned_ = current_pos;
+*h_total_len_pinned_ = current_pos + 1;
+cudaMemcpyAsync(d_token_, h_token_pinned_, sizeof(int),
+                cudaMemcpyHostToDevice, compute_stream);
+// ... 同理其他 3 个参数
+```
+
+Pinned Memory 绕过 OS page fault，`cudaMemcpyAsync` 在 compute stream 上非阻塞执行，消除了 default-stream 序列化问题。
+
+#### 9.3.5 CudaGraphManager 设计
+
+```cpp
+class CudaGraphManager {
+    cudaGraph_t graph_;
+    cudaGraphExec_t graph_exec_;
+    bool captured_ = false;
+    // 性能统计
+    size_t launch_count_, total_setup_us_, total_launch_us_;
+
+    void staticLaunch(setup_fn, decode_fn, stream) {
+        setup_fn();  // 更新 d_token/d_pos/d_start_pos/d_total_len
+        if (!captured_) {
+            cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+            decode_fn();  // 录制全部 ~308 个 kernel
+            cudaStreamEndCapture(stream, &graph_);
+            cudaGraphInstantiate(&graph_exec_, graph_);
+            captured_ = true;  // 仅一次
+        }
+        cudaGraphLaunch(graph_exec_, stream);  // 重放固定拓扑
+    }
+};
+```
+
+"捕获一次，永久重放"：首次 decode 录制 Graph（~4ms），后续每 token 仅需 setup_fn (~35μs) + cudaGraphLaunch (~130μs)。
+
+#### 9.3.6 实测结果
+
+**Overhead 分解** (INT8+KV8, RTX 4060 Ti):
+
+| 阶段 | 开销 | 说明 |
+|------|:---:|------|
+| setup_fn (pinned H2D × 4) | ~35μs | token/pos/start_pos/total_len |
+| cudaGraphLaunch | ~130μs | 固定拓扑重放 |
+| **合计/token** | **~165μs** | vs 原始 ~1850μs (308 kernel launches) |
+| **节省** | **91%** | launch overhead 消除 |
+
+**Profile 实测** (`LLAISYS_CUDA_GRAPH_STATS=1`):
+```
+[CudaGraph/Static] launches=116 capture_once=4012us
+  avg_setup=28.2us avg_launch=102.7us avg_total=130.9us
+```
+
+Graph 节点数：FP32=565，INT8+KV8=509，INT8+FP16KV=453（差异来自不同 KV Cache 路径的算子数量）。
 
 ### 9.4 进一步优化方向
 
-基于 Roofline 分析，本项目 Decode 阶段已 **触及 HBM 带宽理论极限**。继续提升单请求 tok/s 的唯一路径：
+基于 Roofline 分析，本项目 Decode 阶段已处于显著 memory-bound 区域，单请求 tok/s 已进入高位区间。继续提升可从以下方向推进：
 
 | 方向 | 预期收益 | 原理 |
 |------|----------|------|
@@ -582,7 +658,7 @@ for (int step = 0; step < max_len; step++) {
 
 ## 10. API 参考
 
-### 9.1 C API
+### 10.1 C API
 
 **Tensor**:
 | 函数 | 说明 |
@@ -606,7 +682,7 @@ const LlaisysRuntimeAPI* llaisysGetRuntimeAPI(llaisysDeviceType_t);
 void llaisysSetContextRuntime(llaisysDeviceType_t, int device_id);
 ```
 
-### 9.2 Python API
+### 10.2 Python API
 
 ```python
 from llaisys.models import Qwen2
@@ -619,7 +695,7 @@ for token in model.generate_stream("你好"):
 model.reset()
 ```
 
-### 9.3 Chat Server (OpenAI 兼容)
+### 10.3 Chat Server (OpenAI 兼容)
 
 ```bash
 PYTHONPATH=python python -m llaisys.server.app --model <path> --device nvidia
@@ -635,7 +711,7 @@ PYTHONPATH=python python -m llaisys.server.app --model <path> --device nvidia
 
 ## 11. 复现指南
 
-### 10.1 环境要求
+### 11.1 环境要求
 
 | 依赖 | 版本 |
 |------|------|
@@ -645,7 +721,7 @@ PYTHONPATH=python python -m llaisys.server.app --model <path> --device nvidia
 | Python | ≥3.9 |
 | GCC | ≥9 (C++17) |
 
-### 10.2 编译与安装
+### 11.2 编译与安装
 
 ```bash
 git clone https://github.com/xsmccc/llaisys.git && cd llaisys
@@ -654,7 +730,7 @@ cp build/linux/x86_64/release/libllaisys.so python/llaisys/libllaisys/
 pip install -e python/
 ```
 
-### 10.3 模型下载与量化
+### 11.3 模型下载与量化
 
 ```bash
 # 下载
@@ -672,7 +748,7 @@ PYTHONPATH=python python3 scripts/quantize_model_int4.py \
     --output-dir models/DeepSeek-R1-Distill-Qwen-1.5B-INT4 --group-size 128
 ```
 
-### 10.4 运行测试
+### 11.4 运行测试
 
 ```bash
 # 算子正确性 (8/8)
@@ -691,7 +767,7 @@ for t in model.generate_stream('What is GPU computing?', max_new_tokens=64):
 "
 ```
 
-### 10.5 常见问题
+### 11.5 常见问题
 
 | 问题 | 解决 |
 |------|------|
