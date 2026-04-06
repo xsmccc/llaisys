@@ -139,7 +139,7 @@ public:
         tensor_t q, k, v;
 
         if (qkv_merged_) {
-            qkv_proj_.forward(ws_qkv_, x);
+            qkv_proj_.forward(ws_qkv_, x); // 一个 GEMM 算出 Q/K/V
             size_t nq = config_.hidden_size;
             size_t nkv = config_.kv_dim();
             q = ws_qkv_->slice(1, 0, nq)->view(q_shape_);
@@ -153,7 +153,7 @@ public:
             k = ws_k_2d_->view(kv_shape_);
             v = ws_v_2d_->view(kv_shape_);
         }
-
+        // RoPE 位置编码
         ops::rope(ws_q_rope_, q, pos_tensor, config_.rope_theta);
         ops::rope(ws_k_rope_, k, pos_tensor, config_.rope_theta);
 

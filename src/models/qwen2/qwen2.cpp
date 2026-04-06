@@ -22,7 +22,7 @@
 using namespace llaisys;
 
 // ============ Random Sampling ============
-
+// sample采样函数，输入logits和采样参数，输出采样的token id
 static int64_t sample_token(float* logits, size_t vocab_size,
                             float temperature, int top_k, float top_p,
                             uint64_t seed) {
@@ -40,10 +40,10 @@ static int64_t sample_token(float* logits, size_t vocab_size,
     for (size_t i = 0; i < vocab_size; ++i) logits[i] *= inv_sum;
 
     std::vector<int64_t> indices(vocab_size);
-    std::iota(indices.begin(), indices.end(), 0);
+    std::iota(indices.begin(), indices.end(), 0); // 数值递增填充函数
     std::sort(indices.begin(), indices.end(), [&](int64_t a, int64_t b) {
         return logits[a] > logits[b];
-    });
+    }); // 快排 + lambda比较器，按 logit 大小排序索引
 
     size_t cutoff = vocab_size;
     if (top_k > 0 && static_cast<size_t>(top_k) < vocab_size)
@@ -65,7 +65,7 @@ static int64_t sample_token(float* logits, size_t vocab_size,
 
     std::mt19937_64 rng(seed != 0 ? seed : std::random_device{}());
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    float r = dist(rng);
+    float r = dist(rng); // 生成0-1的随机数
     double cumulative = 0.0;
     for (size_t i = 0; i < cutoff; ++i) {
         cumulative += logits[indices[i]];
@@ -86,20 +86,24 @@ public:
 
 #ifdef ENABLE_NVIDIA_API
         if (config_.device_type == LLAISYS_DEVICE_NVIDIA) {
-            const char* graph_env = std::getenv("LLAISYS_CUDA_GRAPH");
+            const char* graph_env = std::getenv("LLAISYS_CUDA_GRAPH"); // 检查graph是否开启
             if (graph_env && std::string(graph_env) == "1") {
-                decode_graph_ = std::make_unique<llaisys::models::qwen2::CudaGraphManager>();
+                decode_graph_ = std::make_unique<llaisys::models::qwen2::CudaGraphManager>(); // 初始化CUDAGraph管理
                 cuda_graph_enabled_ = true;
                 // Allocate device buffers for static capture params
                 cudaMalloc(&d_start_pos_, sizeof(size_t));
                 cudaMalloc(&d_total_len_, sizeof(size_t));
                 // Pinned host memory for async H2D (avoids cudaMemcpy sync stalls)
+                // 为什么不用普通 malloc？
+                // → 普通内存是 pageable，cudaMemcpyAsync 实际会退化为同步
+                // → pinned memory 保证 DMA 直传，真正的异步
                 cudaMallocHost(&h_start_pos_pinned_, sizeof(size_t));
                 cudaMallocHost(&h_total_len_pinned_, sizeof(size_t));
                 cudaMallocHost(&h_token_pinned_, sizeof(int64_t));
                 cudaMallocHost(&h_pos_pinned_, sizeof(int64_t));
                 // FlashDecoding supports d_total_len → no smem limit on total_len
                 // graph_max_total_len sets grid dims (idle blocks early-return)
+                // 确保grid足够大，设置FD的最大grid维度
                 graph_max_total_len_ = config_.max_position_embeddings;
                 std::cerr << "[Qwen2] CUDA Graph enabled (static capture, max_total_len="
                           << graph_max_total_len_ << ")" << std::endl;
@@ -139,6 +143,7 @@ public:
         if (!weights_distributed_) { distribute_weights(); weights_distributed_ = true; }
         if (!weights_.in_embed) { std::cerr << "[ERROR] Weights not loaded!" << std::endl; return 0; }
 
+        // 分配workspace tensor
         prepare_for_seq_len(ntoken);
 
         // ── Forward pass ──
@@ -360,10 +365,10 @@ private:
     size_t* d_total_len_ = nullptr;   // device pointer
     size_t graph_max_total_len_ = 0;  // FlashDecoding grid dim limit
     // Pinned host memory for async H2D (no default-stream sync stall)
-    size_t* h_start_pos_pinned_ = nullptr;
-    size_t* h_total_len_pinned_ = nullptr;
-    int64_t* h_token_pinned_ = nullptr;
-    int64_t* h_pos_pinned_ = nullptr;
+    size_t* h_start_pos_pinned_ = nullptr; // KV Cache写入位置
+    size_t* h_total_len_pinned_ = nullptr; // KV 序列长度
+    int64_t* h_token_pinned_ = nullptr;    // token_id
+    int64_t* h_pos_pinned_ = nullptr;      // position
 #endif
 
     void prepare_for_seq_len(size_t seq_len) {

@@ -126,10 +126,10 @@ public:
             // Run setup on stream (H2D params)
             setup_fn();
 
-            cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-            forward_fn();
+            cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal); // 开始录制
+            forward_fn();   //不执行，只记录参数
             cudaGraph_t graph = nullptr;
-            cudaError_t cap_err = cudaStreamEndCapture(stream, &graph);
+            cudaError_t cap_err = cudaStreamEndCapture(stream, &graph); // 结束录制
 
             if (cap_err != cudaSuccess || graph == nullptr) {
                 std::cerr << "[CudaGraph/Static] Capture failed: "
@@ -145,8 +145,8 @@ public:
             std::cerr << "[CudaGraph/Static] Graph captured: " << numNodes
                       << " nodes" << std::endl;
 
-            cudaError_t inst_err = cudaGraphInstantiate(&exec_, graph, 0);
-            cudaGraphDestroy(graph);
+            cudaError_t inst_err = cudaGraphInstantiate(&exec_, graph, 0); // 实例化
+            cudaGraphDestroy(graph);    // 销毁
             if (inst_err != cudaSuccess) {
                 std::cerr << "[CudaGraph/Static] Instantiate failed: "
                           << cudaGetErrorString(inst_err) << std::endl;
@@ -157,18 +157,18 @@ public:
 
             auto t1 = std::chrono::high_resolution_clock::now();
             total_capture_us_ += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-            static_captured_ = true;
+            static_captured_ = true;    // 已录制
             ever_static_ = true;
 
             // Launch the captured graph (first real output)
-            cudaGraphLaunch(exec_, stream);
+            cudaGraphLaunch(exec_, stream); // 第一次launch
             launch_count_++;
             return;
         }
 
         // Subsequent calls: update params via H2D, then launch
         auto t0 = std::chrono::high_resolution_clock::now();
-        setup_fn();
+        setup_fn(); // 更新参数
         auto t1 = std::chrono::high_resolution_clock::now();
         cudaGraphLaunch(exec_, stream);
         auto t2 = std::chrono::high_resolution_clock::now();

@@ -101,16 +101,17 @@ static CachedBuffer g_input_fp16_buf;
 // ============================================================
 
 // Dequant INT8 → FP16 (向量化 4x)
+// 向量化类型转换
 __global__ void dequant_int8_to_fp16_vec4(
     __half* __restrict__ out,
     const int8_t* __restrict__ w,
     const float* __restrict__ s,
-    size_t N, size_t K
+    size_t N, size_t K // N是行数，K是列数（特征维度）
 ) {
     const size_t K4 = K / 4;
-    const size_t total = N * K4;
-    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-         i < total; i += gridDim.x * blockDim.x) {
+    const size_t total = N * K4; // 每个线程处理一个 char4 (4 个 INT8 权重)
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; // 全局索引
+         i < total; i += gridDim.x * blockDim.x) { // grobal stride loop
         float sc = s[i / K4];
         char4 v = reinterpret_cast<const char4*>(w)[i];
         __half* d = out + i * 4;
@@ -121,6 +122,7 @@ __global__ void dequant_int8_to_fp16_vec4(
     }
 }
 
+// INT8 → FP16 标量版本 (处理 K 不被 4 整除的情况)
 __global__ void dequant_int8_to_fp16_scalar(
     __half* __restrict__ out,
     const int8_t* __restrict__ w,
@@ -138,6 +140,7 @@ __global__ void dequant_int8_to_fp16_scalar(
 //  INT4 Group Dequant: unpack uint8 → 2×int4 → FP16
 //  Pack format: byte = (high_nibble << 4) | (low_nibble & 0xF)
 //  Scales: FP16 [N, num_groups], group_size typically 128
+// 每个线程处理一个 uint8_t，解出两个 int4 权重并乘以对应的 scale 转 FP16
 // ============================================================
 __global__ void dequant_int4_to_fp16_group(
     __half* __restrict__ out,
@@ -231,13 +234,13 @@ __global__ void add_bias_fp16_from_f32(
 //
 //  每个 warp 计算一个输出: out[n] = sum_k(W_int8[n,k] * scale[n] * x[k])
 // ============================================================
-static constexpr int GEMV_WARPS_PER_BLOCK = 8;
-static constexpr int GEMV_BLOCK_DIM = GEMV_WARPS_PER_BLOCK * 32;  // 256
+static constexpr int GEMV_WARPS_PER_BLOCK = 8;  // 每个block的warp数量
+static constexpr int GEMV_BLOCK_DIM = GEMV_WARPS_PER_BLOCK * 32;  // 256线程per block
 
 __global__ void int8_gemv_kernel(
     void* __restrict__ out,
-    const __half* __restrict__ x,       // [K]
-    const int8_t* __restrict__ W,       // [N, K] row-major
+    const __half* __restrict__ x,       // [K] 输入
+    const int8_t* __restrict__ W,       // [N, K] row-major 权重
     const float* __restrict__ scales,   // [N] per-channel
     int N, int K,
     bool out_fp16                       // true: __half output, false: float output
@@ -251,7 +254,7 @@ __global__ void int8_gemv_kernel(
 
     const int warp_id = threadIdx.x / 32;
     const int lane_id = threadIdx.x & 31;
-    const int n = blockIdx.x * GEMV_WARPS_PER_BLOCK + warp_id;
+    const int n = blockIdx.x * GEMV_WARPS_PER_BLOCK + warp_id; // warp负责第n行
 
     if (n >= N) return;
 
@@ -276,7 +279,7 @@ __global__ void int8_gemv_kernel(
     for (int k = K4 * 4 + lane_id; k < K; k += 32)
         sum += float(w_row[k]) * __half2float(x_smem[k]);
 
-    sum *= scale;  // per-channel dequant
+    sum *= scale;  // per-channel dequant 计算之后再乘scale
 
     // Warp shuffle reduce
     #pragma unroll
@@ -631,7 +634,7 @@ void linear_quantized_int4_impl(
 //  权重缓存清理 (释放所有 GPU 显存)
 // ============================================================
 namespace llaisys::ops::nvidia {
-
+ 
 void cleanup_quantized_weight_cache() {
     std::lock_guard<std::mutex> lock(g_cache_mutex);
     for (auto& [key, ptr] : g_weight_fp16_cache) {

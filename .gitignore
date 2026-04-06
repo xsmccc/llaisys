@@ -115,3 +115,21 @@ CHANGELOG.md
 
 # Copilot instructions
 .github/instructions/
+
+# Private learning materials
+learning/
+models/
+python/build/
+python/*.egg-info/
+venv/
+report/
+*.ncu-rep
+
+# Private learning materials
+learning/
+models/
+python/build/
+python/*.egg-info/
+venv/
+report/
+*.ncu-rep

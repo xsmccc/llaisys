@@ -201,7 +201,7 @@ __global__ void self_attention_fused(
 ) {
     const size_t total_len = d_total_len ? *d_total_len : total_len_hint;
     // ── 索引映射 ──
-    size_t i    = blockIdx.x;                     // query 位置
+    size_t i    = blockIdx.x;                     // query 位置 token位置
     size_t h    = blockIdx.y;                     // 注意力头索引
     size_t kv_h = h / (nhead / kv_head);          // GQA 映射到 KV head
 
@@ -322,7 +322,7 @@ __global__ void self_attention_fused(
 }
 
 // ============================================================
-//  FlashAttention v2 Kernel — Tiled Online Softmax (优化版)
+//  FlashAttention v2 Kernel — Tiled Online Softmax 
 // ============================================================
 //
 //  将 KV 序列分成 Bc 大小的 tile，逐 tile 处理。
@@ -805,7 +805,7 @@ void self_attention(
 
     // ─────────────────────────────────────────────────────────
     //  cuBLAS Prefill Path: seq_len > 1 时用 batched GEMM
-    //  比自定义 kernel 快 10 倍以上 (真正的 GEMM 问题)
+    //  比自定义 kernel 快 10 倍以上 (真正的 GEMM 问题)-手写的flashattn比GEMM cuBLAS库慢
     // ─────────────────────────────────────────────────────────
     if (seq_len > 1 && seq_len * total_len > 128 * 128) {
         cublasHandle_t cublas_handle = get_cublas_handle();
